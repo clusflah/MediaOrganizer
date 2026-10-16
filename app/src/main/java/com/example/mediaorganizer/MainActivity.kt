@@ -23,7 +23,11 @@ import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.*
 import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.settings.SettingsRepository
+import com.example.mediaorganizer.storage.CleanupMode
+import com.example.mediaorganizer.storage.CleanupReport
+import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.FileOperation
+import com.example.mediaorganizer.storage.SourceCleaner
 import com.example.mediaorganizer.storage.OperationLog
 import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.storage.StorageException
@@ -113,7 +117,7 @@ data class ConnCheck(val label: String, val level: Level, val detail: String) {
 
 enum class ConnState { UNTESTED, OK, FAIL }
 
-enum class Task { SCAN, TEST, MATCH, ORGANIZE, SCRAPE, UNDO }
+enum class Task { SCAN, TEST, MATCH, ORGANIZE, SCRAPE, UNDO, CLEAN }
 
 /** 撤销前给用户看的汇总 */
 data class UndoSummary(
@@ -462,11 +466,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } else "整理完成：成功 ${report.succeeded}，失败 ${report.failed}"
         if (indexed.size > 1 && report.failed > 0) filter = RowCategory.FAILED
 
+        cleanSources(s, report.outcomes.filter { it.error == null && !it.skipped }.map { it.plan })?.let { c ->
+            if (c.removed.isNotEmpty()) status += "；清理原文件夹 ${c.removed.size} 个"
+            if (c.kept.isNotEmpty()) status += "，${c.kept.size} 个还有其他文件已保留"
+            if (c.errors.isNotEmpty()) status += "，${c.errors.size} 个删除失败（${c.errors.first()}）"
+        }
+
         if (settings.autoScrape) {
             task = Task.SCRAPE
             runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；")
         }
     }
+
+    // ---------- 清理原文件夹 ----------
+
+    /** 不能删的：扫描目录、两个库目录，以及所有已知的目标目录（含上级） */
+    private fun cleaner(s: WebDavStorage, mode: CleanupMode): SourceCleaner {
+        val st = settings
+        val targets = rows.mapNotNull { it.plan }.flatMap { listOf(it.targetDir, it.showDir) }
+        return SourceCleaner(s, mode, st.scanDir, listOf(st.movieRoot, st.tvRoot) + targets)
+    }
+
+    private suspend fun cleanSources(s: WebDavStorage, moved: List<RenamePlan>): CleanupReport? {
+        val mode = settings.cleanupMode
+        if (mode == CleanupMode.OFF || moved.isEmpty()) return null
+        status += "；清理原文件夹…"
+        val sources = moved.map { parentPath(it.item.file.path) }
+        return cleaner(s, mode).cleanAfterMove(sources).also { status = status.removeSuffix("；清理原文件夹…") }
+    }
+
+    /** 手动清理时找到的残留文件夹，null = 没在看 */
+    var leftovers by mutableStateOf<List<CleanupTarget>?>(null)
+        private set
+
+    private fun manualMode() = settings.cleanupMode.takeIf { it != CleanupMode.OFF } ?: CleanupMode.EMPTY_ONLY
+
+    fun findLeftovers() = launchTask(Task.CLEAN) {
+        status = "查找扫描目录里的残留文件夹…"
+        val s = storage ?: newStorage().also { it.connect(); storage = it }
+        val found = cleaner(s, manualMode()).findLeftovers()
+        leftovers = found
+        status = if (found.isEmpty()) "没有发现可清理的文件夹" else "发现 ${found.size} 个可清理的文件夹"
+    }
+
+    fun deleteLeftovers(targets: List<CleanupTarget>) = launchTask(Task.CLEAN) {
+        leftovers = null
+        val s = storage ?: return@launchTask
+        status = "清理中…"
+        val r = cleaner(s, manualMode()).delete(targets)
+        status = "已删除 ${r.removed.size} 个文件夹" + if (r.errors.isNotEmpty()) "，${r.errors.size} 个失败（${r.errors.first()}）" else ""
+    }
+
+    fun dismissLeftovers() { leftovers = null }
 
     fun scrapeOne(key: String) = launchTask(Task.SCRAPE) {
         val s = storage ?: return@launchTask

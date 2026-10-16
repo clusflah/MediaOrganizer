@@ -30,6 +30,7 @@ import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeStrategy
 import com.example.mediaorganizer.scraper.ScrapeTemplate
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.storage.CleanupMode
 
 private val Accent = Color(0xFFFF7A00)
 private val Recommend = Color(0xFF1FA463)
@@ -156,6 +157,17 @@ fun NamingSettingsScreen(
                     if (config.movieFolder) SwitchRow("文件夹名与文件名一致", config.folderSameAsFile) {
                         update(config.copy(folderSameAsFile = it))
                     }
+                }
+                SubTitle("整理后的原文件夹（电影和剧集共用）")
+                RadioOption("删除，连同残留的 NFO、图片等", settings.cleanupMode == CleanupMode.LEFTOVERS, recommended = true,
+                    desc = "还有其他视频、字幕或认不出的文件时整个保留；扫描目录和影视库目录本身不会删") {
+                    onChange(settings.copy(cleanupMode = CleanupMode.LEFTOVERS))
+                }
+                RadioOption("只删除变空的文件夹", settings.cleanupMode == CleanupMode.EMPTY_ONLY) {
+                    onChange(settings.copy(cleanupMode = CleanupMode.EMPTY_ONLY))
+                }
+                RadioOption("保留不动", settings.cleanupMode == CleanupMode.OFF) {
+                    onChange(settings.copy(cleanupMode = CleanupMode.OFF))
                 }
             }
 

@@ -35,6 +35,8 @@ import com.example.mediaorganizer.metadata.MediaMatcher
 import com.example.mediaorganizer.metadata.MediaType
 import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.storage.CleanupMode
+import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.normalizePath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
@@ -142,6 +144,9 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
     detailKey?.let { key -> vm.rows.firstOrNull { it.key == key } }?.let { row ->
         RowDetailDialog(vm, row, onDismiss = { detailKey = null })
     }
+    vm.leftovers?.let { found ->
+        LeftoversDialog(found, vm.settings.cleanupMode, onDelete = vm::deleteLeftovers, onDismiss = vm::dismissLeftovers)
+    }
     if (askUndo) vm.undoSummary()?.let { sum ->
         UndoConfirmDialog(sum, onConfirm = { askUndo = false; vm.undo() }, onDismiss = { askUndo = false })
     }
@@ -181,6 +186,17 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
             },
             enabled = undo != null && !vm.busy,
             onClick = { go(onUndo) },
+        )
+        DropdownMenuItem(
+            text = {
+                Column {
+                    Text("清理残留文件夹")
+                    Text("找出扫描目录里没有视频的旧文件夹", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+            },
+            enabled = !vm.busy && vm.settings.webdavUrl.isNotBlank(),
+            onClick = { go(vm::findLeftovers) },
         )
         HorizontalDivider()
         DropdownMenuItem(text = { Text("命名规则") }, onClick = { go(openNaming) })
@@ -497,7 +513,7 @@ private fun BottomBar(
                     Spacer(Modifier.width(12.dp))
                     OutlinedButton(onClick = vm::stopScan) { Text("停止") }
                 }
-                Task.ORGANIZE, Task.SCRAPE, Task.UNDO -> {
+                Task.ORGANIZE, Task.SCRAPE, Task.UNDO, Task.CLEAN -> {
                     Text(vm.status, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(6.dp))
                     val p = vm.progress
@@ -586,7 +602,16 @@ private fun OrganizeConfirmDialog(
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 8.dp),
                     )
-                    Text("目标已存在的文件不会被覆盖；整理后可在菜单里撤销。", style = MaterialTheme.typography.bodySmall,
+                    Text(
+                        when (s.cleanupMode) {
+                            CleanupMode.OFF -> "原文件夹保留不动。"
+                            CleanupMode.EMPTY_ONLY -> "整理后删除变空的原文件夹。"
+                            CleanupMode.LEFTOVERS -> "整理后删除原文件夹（连同残留的 NFO、图片等）；还有其他视频或字幕的文件夹保留。"
+                        },
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 6.dp),
+                    )
+                    Text("目标已存在的文件不会被覆盖；整理后可在菜单里撤销（删掉的残留文件除外）。", style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 6.dp))
                 }
             }
@@ -636,6 +661,58 @@ private fun MoveLine(m: PlannedMove, s: AppSettings, showTarget: Boolean, mark: 
         if (showTarget) Text("→ " + shortTarget(m.to, s), style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
     }
+}
+
+/** 手动清理前确认：列出每个要删的文件夹和里面的东西，可逐个取消勾选 */
+@Composable
+private fun LeftoversDialog(
+    found: List<CleanupTarget>, mode: CleanupMode,
+    onDelete: (List<CleanupTarget>) -> Unit, onDismiss: () -> Unit,
+) {
+    var chosen by remember(found) { mutableStateOf(found.map { it.dir }.toSet()) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (found.isEmpty()) "没有可清理的文件夹" else "清理 ${found.size} 个残留文件夹？") },
+        text = {
+            LazyColumn {
+                item {
+                    Text(
+                        if (found.isEmpty()) "扫描目录里的文件夹都还有视频、字幕或其他文件。"
+                        else if (mode == CleanupMode.EMPTY_ONLY) "这些文件夹是空的（系统缓存文件不算）。"
+                        else "这些文件夹里没有视频和字幕，只剩 NFO、图片、txt 等残留。删除后无法撤销。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                }
+                items(found, key = { it.dir }) { t ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { chosen = if (t.dir in chosen) chosen - t.dir else chosen + t.dir }
+                            .padding(vertical = 4.dp),
+                        verticalAlignment = Alignment.Top,
+                    ) {
+                        Checkbox(checked = t.dir in chosen, onCheckedChange = null, modifier = Modifier.padding(top = 2.dp, end = 8.dp))
+                        Column {
+                            Text(t.dir, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                            Text(
+                                if (t.files == 0) "空文件夹" else "${t.files} 个文件：" + t.sample.joinToString("、") +
+                                    if (t.files > t.sample.size) " …" else "",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                                maxLines = 2, overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            if (found.isNotEmpty()) Button(
+                onClick = { onDelete(found.filter { it.dir in chosen }) }, enabled = chosen.isNotEmpty(),
+                colors = ButtonDefaults.buttonColors(containerColor = Red),
+            ) { Text("删除 ${chosen.size} 个") }
+            else TextButton(onClick = onDismiss) { Text("好") }
+        },
+        dismissButton = { if (found.isNotEmpty()) TextButton(onClick = onDismiss) { Text("取消") } },
+    )
 }
 
 private fun formatTime(ms: Long): String =

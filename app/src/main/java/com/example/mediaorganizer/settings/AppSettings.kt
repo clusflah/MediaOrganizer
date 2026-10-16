@@ -3,6 +3,7 @@ package com.example.mediaorganizer.settings
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeTemplate
+import com.example.mediaorganizer.storage.CleanupMode
 
 /** 应用全部设置 */
 data class AppSettings(
@@ -25,6 +26,8 @@ data class AppSettings(
     // 刮削
     val scrape: ScrapeConfig = ScrapeConfig(),
     val autoScrape: Boolean = true,
+    // 整理后
+    val cleanupMode: CleanupMode = CleanupMode.LEFTOVERS,
 )
 
 /**
@@ -46,6 +49,7 @@ object SettingsCodec {
         put("tvRoot", s.tvRoot)
         put("player", s.player)
         put("autoScrape", s.autoScrape.toString())
+        put("cleanupMode", s.cleanupMode.name)
         putAll(encodeNaming(s.movieNaming, "movie."))
         putAll(encodeNaming(s.tvNaming, "tv."))
         putAll(encodeScrape(s.scrape, "scrape."))
@@ -66,6 +70,7 @@ object SettingsCodec {
             tvRoot = r.str("tvRoot", d.tvRoot),
             player = r.str("player", d.player),
             autoScrape = r.bool("autoScrape", d.autoScrape),
+            cleanupMode = r.enum("cleanupMode", d.cleanupMode),
             movieNaming = decodeNaming(m, "movie.", d.movieNaming),
             tvNaming = decodeNaming(m, "tv.", d.tvNaming),
             scrape = decodeScrape(m, "scrape.", d.scrape),
