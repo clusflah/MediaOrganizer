@@ -131,6 +131,14 @@ class WebDavStorage(
             .use { it.ensure("删除失败：${file.path}") }
     }
 
+    /** 读取单个文件夹的信息，不存在返回 null（连接测试用） */
+    suspend fun statDir(path: String): RemoteFile? =
+        propfind(normalize(path), depth = 0, dir = true).use { resp ->
+            if (resp.code == 404) return@use null
+            resp.ensure("读取失败：$path")
+            parseMultiStatus(resp.body!!.byteStream()).firstOrNull()
+        }
+
     /** 下载小文件（读取已有 NFO 等），大文件请用流式读取 */
     suspend fun readBytes(path: String): ByteArray =
         execute(Request.Builder().url(url(normalize(path))).get().build()).use { resp ->

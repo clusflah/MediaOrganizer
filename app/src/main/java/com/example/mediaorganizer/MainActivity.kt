@@ -2,6 +2,7 @@ package com.example.mediaorganizer
 
 import android.app.Application
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -31,6 +32,8 @@ import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.settings.SettingsRepository
 import com.example.mediaorganizer.storage.FileOperation
 import com.example.mediaorganizer.storage.OperationLog
+import com.example.mediaorganizer.storage.RemoteFile
+import com.example.mediaorganizer.storage.StorageException
 import com.example.mediaorganizer.storage.WebDavStorage
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
@@ -39,6 +42,10 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
+import javax.net.ssl.SSLException
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -75,6 +82,11 @@ data class MediaRow(
     val outcome: String? = null,     // null=未执行, "ok", "无需改动", 或错误信息
 )
 
+/** 连接测试的一项结果 */
+data class ConnCheck(val label: String, val level: Level, val detail: String) {
+    enum class Level { OK, WARN, FAIL }
+}
+
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SettingsRepository(app)
     private val opLog = OperationLog(File(app.filesDir, "last_batch.log"))
@@ -88,6 +100,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var status by mutableStateOf("")
     var busy by mutableStateOf(false)
     var canUndo by mutableStateOf(false)
+    var connChecks by mutableStateOf<List<ConnCheck>>(emptyList())
+        private set
 
     private var storage: WebDavStorage? = null
     private var tmdb: TmdbClient? = null
@@ -107,6 +121,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 每次修改立即生效，300ms 防抖后写入 DataStore（输入框打字不会频繁写盘） */
     fun updateSettings(new: AppSettings) {
+        val old = settings
+        if (new.webdavUrl != old.webdavUrl || new.username != old.username || new.password != old.password ||
+            new.scanDir != old.scanDir || new.movieRoot != old.movieRoot || new.tvRoot != old.tvRoot
+        ) connChecks = emptyList()          // 连接信息改了，旧的测试结果作废
         settings = new
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
@@ -152,6 +170,95 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshPreview()
         val pending = rows.count { !it.confirmed }
         status = "共 ${rows.size} 个视频" + if (pending > 0) "，$pending 个待确认（点击条目选择）" else ""
+    }
+
+    /** 依次检查：服务器能否登录 → 扫描目录可读 → 电影库/剧集库可写 */
+    fun testConnection() = launchBusy {
+        val s0 = settings
+        val checks = mutableListOf<ConnCheck>()
+        fun add(c: ConnCheck) { checks += c; connChecks = checks.toList() }
+        connChecks = emptyList()
+        status = "测试连接中…"
+
+        val s = try { newStorage() } catch (e: IllegalArgumentException) {
+            add(ConnCheck("服务器", ConnCheck.Level.FAIL, "地址格式不对，应类似 http://192.168.1.10:5005"))
+            status = "连接测试失败"
+            return@launchBusy
+        }
+        val t0 = SystemClock.elapsedRealtime()
+        try {
+            s.connect()
+        } catch (e: Exception) {
+            add(ConnCheck("服务器", ConnCheck.Level.FAIL, connErrorText(e)))
+            status = "连接测试失败"
+            return@launchBusy
+        }
+        add(ConnCheck("服务器", ConnCheck.Level.OK, "已登录（${SystemClock.elapsedRealtime() - t0} ms）"))
+
+        add(checkDir(s, "扫描目录", s0.scanDir, library = false))
+        add(checkDir(s, "电影库", s0.movieRoot, library = true))
+        if (s0.tvRoot.trim().trimEnd('/') != s0.movieRoot.trim().trimEnd('/'))
+            add(checkDir(s, "剧集库", s0.tvRoot, library = true))
+
+        val fails = checks.count { it.level == ConnCheck.Level.FAIL }
+        val warns = checks.count { it.level == ConnCheck.Level.WARN }
+        status = when {
+            fails > 0 -> "连接测试：$fails 项失败"
+            warns > 0 -> "连接测试通过，$warns 项需留意"
+            else -> "连接测试全部通过"
+        }
+    }
+
+    private suspend fun checkDir(s: WebDavStorage, label: String, dir: String, library: Boolean): ConnCheck {
+        if (dir.isBlank()) return ConnCheck(label, ConnCheck.Level.WARN, "未填写")
+        val path = WebDavStorage.normalize(dir)
+        return try {
+            val info = s.statDir(path)
+            when {
+                info == null && library -> ConnCheck(label, ConnCheck.Level.WARN, "$path 不存在，整理时会自动创建")
+                info == null -> ConnCheck(label, ConnCheck.Level.FAIL, "$path 不存在")
+                !info.isDirectory -> ConnCheck(label, ConnCheck.Level.FAIL, "$path 是文件，不是文件夹")
+                !library -> ConnCheck(label, ConnCheck.Level.OK, "可读取，含 ${s.list(path).size} 项")
+                else -> checkWritable(s, label, path)
+            }
+        } catch (e: Exception) {
+            ConnCheck(label, ConnCheck.Level.FAIL, connErrorText(e))
+        }
+    }
+
+    /** 写一个空的临时文件再删掉，确认有写权限 */
+    private suspend fun checkWritable(s: WebDavStorage, label: String, dir: String): ConnCheck {
+        val probe = RemoteFile(
+            path = dir.trimEnd('/') + "/.mediaorganizer-test-${System.currentTimeMillis()}",
+            name = "", isDirectory = false,
+        )
+        try {
+            s.upload(probe.path, ByteArray(0).inputStream(), 0)
+        } catch (e: Exception) {
+            val why = if (e is StorageException && (e.code == 401 || e.code == 403)) "没有写入权限" else connErrorText(e)
+            return ConnCheck(label, ConnCheck.Level.FAIL, "可读取，但$why")
+        }
+        return try {
+            s.delete(probe)
+            ConnCheck(label, ConnCheck.Level.OK, "可读写")
+        } catch (e: Exception) {
+            ConnCheck(label, ConnCheck.Level.WARN, "可写入，但测试文件没删掉，请手动删除 ${probe.path}")
+        }
+    }
+
+    private fun connErrorText(e: Exception): String = when (e) {
+        is StorageException -> when (e.code) {
+            401 -> "用户名或密码错误"
+            403 -> "没有访问权限（HTTP 403）"
+            404 -> "路径不存在（HTTP 404），检查地址里的路径部分"
+            405 -> "该地址不是 WebDAV 服务（HTTP 405），检查端口和路径"
+            else -> e.message ?: "HTTP ${e.code}"
+        }
+        is UnknownHostException -> "找不到主机，检查地址"
+        is ConnectException -> "连不上服务器，检查 IP、端口，以及 WebDAV 服务是否开启"
+        is SocketTimeoutException -> "连接超时，检查网络或是否在同一局域网"
+        is SSLException -> "HTTPS 握手失败（证书问题？局域网可改用 http）"
+        else -> e.message ?: e.javaClass.simpleName
     }
 
     fun choose(index: Int, result: TmdbSearchResult) = launchBusy {
@@ -296,7 +403,7 @@ private fun ConnectionPanel(vm: MainViewModel) {
     val s = vm.settings
     fun up(n: AppSettings) = vm.updateSettings(n)
     Column(
-        Modifier.padding(horizontal = 16.dp).heightIn(max = 380.dp).verticalScroll(rememberScrollState()),
+        Modifier.padding(horizontal = 16.dp).heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         SettingField("WebDAV 地址", s.webdavUrl) { up(s.copy(webdavUrl = it)) }
@@ -305,7 +412,27 @@ private fun ConnectionPanel(vm: MainViewModel) {
         SettingField("扫描目录", s.scanDir) { up(s.copy(scanDir = it)) }
         SettingField("电影库目录", s.movieRoot) { up(s.copy(movieRoot = it)) }
         SettingField("剧集库目录", s.tvRoot) { up(s.copy(tvRoot = it)) }
+        OutlinedButton(
+            onClick = vm::testConnection,
+            enabled = !vm.busy && s.webdavUrl.isNotBlank(),
+            modifier = Modifier.padding(top = 4.dp),
+        ) { Text("测试连接") }
+        vm.connChecks.forEach { ConnCheckRow(it) }
         Spacer(Modifier.height(8.dp))
+    }
+}
+
+@Composable
+private fun ConnCheckRow(c: ConnCheck) {
+    val (mark, color) = when (c.level) {
+        ConnCheck.Level.OK -> "✓" to Color(0xFF2E7D32)
+        ConnCheck.Level.WARN -> "!" to Color(0xFFEF6C00)
+        ConnCheck.Level.FAIL -> "✗" to Color(0xFFC62828)
+    }
+    Row(Modifier.padding(vertical = 2.dp)) {
+        Text(mark, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
+        Text(c.label, fontWeight = FontWeight.Medium, fontSize = 13.sp, modifier = Modifier.width(64.dp))
+        Text(c.detail, fontSize = 13.sp, color = if (c.level == ConnCheck.Level.OK) Color.Unspecified else color)
     }
 }
 
