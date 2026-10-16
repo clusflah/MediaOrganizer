@@ -2,13 +2,25 @@
 
 连接 WebDAV，自动识别影视文件、按播放器规则重命名整理，并刮削海报和 NFO。
 
-## 一、导入项目
+## 一、编译
 
-1. Android Studio → New Project → **Empty Activity**，包名填 `com.example.mediaorganizer`，最低 SDK 选 26。
-2. 删掉模板生成的 `MainActivity.kt` 和 `ui/theme` 文件夹。
-3. 把本压缩包里的 `app/src/main/java/...` 整个目录拷进项目同一位置。
-4. 用本包的 `AndroidManifest.xml` 覆盖项目里的（如模板有自定义主题，保留模板的 `android:theme` 也可以）。
-5. 按 `app/dependencies.gradle.kts.txt` 补齐依赖，Sync 后运行。
+需要 JDK 17+ 和 Android SDK（compileSdk 36）。Android Studio 直接打开本目录即可；命令行：
+
+```
+./gradlew assembleRelease
+```
+
+产物在 `app/build/outputs/apk/release/app-release.apk`。
+
+release 签名从 `~/.gradle/gradle.properties` 读取（不进仓库）：
+
+```
+moSignKeyFile=E:/keys/mediaorganizer.jks
+moSignKeyAlias=mediaorganizer
+moSignKeyPwd=...
+```
+
+没配置时 release 包不签名，可改用 `./gradlew assembleDebug`。
 
 ## 二、首次设置
 
