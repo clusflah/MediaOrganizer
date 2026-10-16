@@ -60,7 +60,7 @@ class WebDavStorage(
     // ---------- StorageProvider ----------
 
     override suspend fun connect() {
-        propfind("/", depth = 0, dir = true).use { resp ->
+        propfind("/", depth = 0, dir = true) { resp ->
             if (resp.code == 401) throw StorageException(401, "用户名或密码错误")
             resp.ensure("连接失败")
         }
@@ -68,7 +68,7 @@ class WebDavStorage(
 
     override suspend fun list(dir: String): List<RemoteFile> {
         val self = normalize(dir)
-        return propfind(self, depth = 1, dir = true).use { resp ->
+        return propfind(self, depth = 1, dir = true) { resp ->
             resp.ensure("读取目录失败：$self")
             parseMultiStatus(resp.body!!.byteStream())
         }.filter { it.path != self }
@@ -76,7 +76,7 @@ class WebDavStorage(
     }
 
     override suspend fun exists(path: String): Boolean =
-        propfind(normalize(path), depth = 0, dir = false).use { resp ->
+        propfind(normalize(path), depth = 0, dir = false) { resp ->
             when {
                 resp.code == 404 -> false
                 resp.isSuccessful -> true
@@ -89,7 +89,7 @@ class WebDavStorage(
         for (seg in normalize(path).split('/').filter { it.isNotEmpty() }) {
             current += "/$seg"
             if (exists(current)) continue
-            execute(Request.Builder().url(url(current, dir = true)).method("MKCOL", null).build()).use { resp ->
+            execute(Request.Builder().url(url(current, dir = true)).method("MKCOL", null).build()) { resp ->
                 // 405 = 已存在
                 if (resp.code != 405) resp.ensure("创建文件夹失败：$current")
             }
@@ -123,25 +123,26 @@ class WebDavStorage(
                 data.source().use { sink.writeAll(it) }
             }
         }
-        execute(Request.Builder().url(url(path)).put(body).build()).use { it.ensure("上传失败：$path") }
+        execute(Request.Builder().url(url(path)).put(body).build()) { it.ensure("上传失败：$path") }
     }
 
     override suspend fun delete(file: RemoteFile) {
-        execute(Request.Builder().url(url(file.path, file.isDirectory)).delete().build())
-            .use { it.ensure("删除失败：${file.path}") }
+        execute(Request.Builder().url(url(file.path, file.isDirectory)).delete().build()) {
+            it.ensure("删除失败：${file.path}")
+        }
     }
 
     /** 读取单个文件夹的信息，不存在返回 null（连接测试用） */
     suspend fun statDir(path: String): RemoteFile? =
-        propfind(normalize(path), depth = 0, dir = true).use { resp ->
-            if (resp.code == 404) return@use null
+        propfind(normalize(path), depth = 0, dir = true) { resp ->
+            if (resp.code == 404) return@propfind null
             resp.ensure("读取失败：$path")
             parseMultiStatus(resp.body!!.byteStream()).firstOrNull()
         }
 
     /** 下载小文件（读取已有 NFO 等），大文件请用流式读取 */
     suspend fun readBytes(path: String): ByteArray =
-        execute(Request.Builder().url(url(normalize(path))).get().build()).use { resp ->
+        execute(Request.Builder().url(url(normalize(path))).get().build()) { resp ->
             resp.ensure("读取失败：$path")
             resp.body!!.bytes()
         }
@@ -157,24 +158,26 @@ class WebDavStorage(
             .header("Destination", url(dest, file.isDirectory).toString())
             .header("Overwrite", "F")   // 目标已存在时不覆盖
             .build()
-        execute(req).use { resp ->
+        execute(req) { resp ->
             if (resp.code == 412) throw StorageException(412, "目标已存在：$dest")
             resp.ensure("移动失败：${file.path} → $dest")
         }
         return file.copy(path = dest, name = dest.substringAfterLast('/'))
     }
 
-    private suspend fun propfind(path: String, depth: Int, dir: Boolean): Response =
+    private suspend fun <T> propfind(path: String, depth: Int, dir: Boolean, handle: (Response) -> T): T =
         execute(
             Request.Builder()
                 .url(url(path, dir))
                 .method("PROPFIND", PROPFIND_BODY.toRequestBody("application/xml; charset=utf-8".toMediaType()))
                 .header("Depth", depth.toString())
-                .build()
+                .build(),
+            handle,
         )
 
-    private suspend fun execute(req: Request): Response = withContext(Dispatchers.IO) {
-        http.newCall(req).execute()
+    /** 发请求并在 IO 线程里处理、关闭响应：读 body 和 close（会读完剩余数据）都是网络操作，不能回到主线程做 */
+    private suspend fun <T> execute(req: Request, handle: (Response) -> T): T = withContext(Dispatchers.IO) {
+        http.newCall(req).execute().use(handle)
     }
 
     private fun Response.ensure(msg: String) {
