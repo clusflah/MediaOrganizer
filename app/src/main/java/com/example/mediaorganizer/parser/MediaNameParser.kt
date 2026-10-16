@@ -114,8 +114,12 @@ object MediaNameParser {
         val ac = AUDIO_CODEC.find(name)
         val other = OTHER_TAGS.findAll(name).firstOrNull { it.range.first > 0 && cleanTitle(name.substring(0, it.range.first)).isNotEmpty() }
 
-        // 5. 年份：取第一个前面已有片名的年份（应对《2012》这类片名）
-        val yearMatch = YEAR.findAll(name).firstOrNull { cleanTitle(name.substring(0, it.range.first)).isNotEmpty() }
+        // 5. 年份：取第一个前面已有片名的年份（应对《2012》这类片名）；
+        //    还没到的年份不算（「银翼杀手2049 (2017)」里的 2049 是片名）
+        val maxYear = java.util.Calendar.getInstance().get(java.util.Calendar.YEAR) + 1
+        val yearMatch = YEAR.findAll(name).firstOrNull {
+            it.value.toInt() <= maxYear && cleanTitle(name.substring(0, it.range.first)).isNotEmpty()
+        }
 
         // 6. 片名 = 第一个“切分点”之前的部分
         val cut = listOfNotNull(

@@ -677,31 +677,8 @@ private fun InfoLine(label: String, value: String, color: Color = Color.Unspecif
     }
 }
 
-/** 详情里对单个文件直接整理 / 刮削 */
-@Composable
-private fun RowActions(vm: MainViewModel, row: MediaRow, onDone: () -> Unit) {
-    val cat = row.category
-    val canOrganize = row.chosen != null && row.match.file != null &&
-        cat in setOf(RowCategory.READY, RowCategory.PENDING, RowCategory.FAILED, RowCategory.EXCLUDED)
-    val canScrape = cat == RowCategory.DONE
-    if (!canOrganize && !canScrape) return
-    Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (canOrganize) Button(onClick = { vm.organizeOne(row.key); onDone() }, enabled = !vm.busy) {
-            Text(when (cat) {
-                RowCategory.PENDING -> "确认并整理"
-                RowCategory.FAILED -> "重试整理"
-                else -> "整理此项"
-            } + if (vm.settings.autoScrape) "+刮削" else "")
-        }
-        if (canScrape) OutlinedButton(onClick = { vm.scrapeOne(row.key); onDone() }, enabled = !vm.busy) {
-            Text(if (vm.settings.autoScrape) "重新刮削" else "刮削此项")
-        }
-    }
-    if (canOrganize) Text(
-        "单独整理会并入「撤销上次整理」的记录",
-        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
-    )
-}
+private fun sameMatch(a: TmdbSearchResult?, b: TmdbSearchResult?) =
+    a != null && b != null && a.id == b.id && a.type == b.type
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -715,6 +692,11 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     var searchError by remember { mutableStateOf<String?>(null) }
     val sameCount = remember(row.key) { vm.sameGroupPendingCount(row.key) }
     var applySame by remember(row.key) { mutableStateOf(true) }
+    // 点候选只是选中，真正生效要点底部按钮；null = 沿用当前匹配
+    var picked by remember(row.key) { mutableStateOf<TmdbSearchResult?>(null) }
+    val pickChanged = picked != null && !sameMatch(picked, row.chosen)
+    val effective = if (pickChanged) picked else row.chosen
+    val scrapeSuffix = if (vm.settings.autoScrape) "+刮削" else ""
     // 已完成的也能改匹配（选错了可以纠正），改完回到「可整理」再整理一次
     val canChange = !vm.busy
     val canExclude = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
@@ -752,9 +734,15 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                         InfoLine("当前匹配", "${it.title} (${it.year ?: "?"}) · TMDB ${it.id}" +
                             if (it == row.match.best) " · 置信度 %.0f%%".format(row.match.score * 100) else "")
                     }
-                    row.plan?.let { InfoLine("整理到", it.targetPath) }
+                    if (pickChanged) InfoLine("改为", "${picked!!.title} (${picked!!.year ?: "?"}) · TMDB ${picked!!.id}",
+                        MaterialTheme.colorScheme.primary)
+                    else row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
-                    RowActions(vm, row, onDone = onDismiss)
+                    Text(
+                        "单独整理会并入「撤销上次整理」的记录",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
                     Spacer(Modifier.height(12.dp))
                 }
                 if (canChange) item {
@@ -781,7 +769,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                         Text("同时用于其他 $sameCount 个同名待确认文件", style = MaterialTheme.typography.bodySmall)
                     }
                     Text(
-                        if (results == null) "候选结果（点击选用）" else "搜索结果（点击选用）",
+                        (if (results == null) "候选结果" else "搜索结果") + "（点选后用底部按钮整理或选用）",
                         style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 8.dp, bottom = 4.dp),
                     )
@@ -792,15 +780,21 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     }
                 }
                 if (canChange && !searching) items(options, key = { "${it.type}-${it.id}" }) { opt ->
-                    val current = row.chosen?.let { it.id == opt.id && it.type == opt.type } == true
+                    val isEffective = sameMatch(opt, effective)
                     Column(
                         Modifier.fillMaxWidth()
                             .clip(RoundedCornerShape(8.dp))
-                            .background(if (current) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
-                            .clickable { vm.choose(row.key, opt, applySame); onDismiss() }
+                            .background(if (isEffective) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+                            .clickable { picked = if (sameMatch(opt, row.chosen)) null else opt }
                             .padding(horizontal = 8.dp, vertical = 8.dp),
                     ) {
-                        Text("${opt.title} (${opt.year ?: "?"})", fontWeight = FontWeight.Medium)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("${opt.title} (${opt.year ?: "?"})", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
+                            if (isEffective) {
+                                Spacer(Modifier.width(6.dp))
+                                Pill(if (pickChanged) "已选" else "当前", if (pickChanged) MaterialTheme.colorScheme.primary else Gray)
+                            }
+                        }
                         Text(
                             listOfNotNull(if (opt.type == MediaType.TV) "剧集" else "电影", opt.originalTitle, "TMDB ${opt.id}")
                                 .joinToString(" · "),
@@ -814,17 +808,38 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                 }
             }
         },
+        // 主按钮：选了别的候选 → 用它整理；否则按当前状态整理 / 刮削
         confirmButton = {
-            if (canChange && row.category == RowCategory.PENDING)
-                Button(onClick = { vm.confirm(setOf(row.key)); onDismiss() }) { Text("确认当前匹配") }
-            else TextButton(onClick = onDismiss) { Text("关闭") }
+            val cat = row.category
+            val hasFile = row.match.file != null
+            when {
+                pickChanged && hasFile -> Button(onClick = {
+                    vm.chooseAndOrganize(row.key, picked!!, applySame); onDismiss()
+                }, enabled = canChange) { Text("用此匹配整理$scrapeSuffix") }
+                cat == RowCategory.DONE -> Button(onClick = { vm.scrapeOne(row.key); onDismiss() }, enabled = canChange) {
+                    Text(if (vm.settings.autoScrape) "重新刮削" else "刮削此项")
+                }
+                row.chosen != null && hasFile -> Button(onClick = { vm.organizeOne(row.key); onDismiss() }, enabled = canChange) {
+                    Text(when (cat) {
+                        RowCategory.PENDING -> "确认并整理"
+                        RowCategory.FAILED -> "重试整理"
+                        else -> "整理此项"
+                    } + scrapeSuffix)
+                }
+                else -> TextButton(onClick = onDismiss) { Text("关闭") }
+            }
         },
         dismissButton = {
             Row {
-                if (canExclude) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
+                if (canExclude && !pickChanged) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
                     Text(if (row.excluded) "取消排除" else "排除")
                 }
-                if (canChange && row.category == RowCategory.PENDING) TextButton(onClick = onDismiss) { Text("关闭") }
+                if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame); onDismiss() }, enabled = canChange) {
+                    Text("仅选用")
+                } else if (row.category == RowCategory.PENDING) TextButton(onClick = { vm.confirm(setOf(row.key)); onDismiss() }, enabled = canChange) {
+                    Text("仅确认")
+                }
+                if (row.chosen != null || pickChanged) TextButton(onClick = onDismiss) { Text("关闭") }
             }
         },
     )

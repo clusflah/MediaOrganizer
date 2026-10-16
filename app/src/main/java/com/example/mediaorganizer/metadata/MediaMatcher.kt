@@ -27,7 +27,16 @@ class MediaMatcher(private val tmdb: TmdbClient) {
     // 同一部剧几十集会反复搜同一个名字，缓存起来
     private val cache = ConcurrentHashMap<String, List<TmdbSearchResult>>()
 
+    // 按 TMDB 标签直接查到的结果，同一部剧的各集共用
+    private val byId = ConcurrentHashMap<String, Result<TmdbSearchResult>>()
+
     suspend fun match(parsed: ParsedMedia, file: RemoteFile? = null): MatchResult {
+        // 路径里已有 TMDB 标签（整理过的库、或用户手动加的）就直接按 ID 取，不再按名字猜
+        file?.let { tagId(it.path) }?.let { id ->
+            val type = if (parsed.isEpisode) MediaType.TV else MediaType.MOVIE
+            lookup(type, id)?.let { return MatchResult(file, parsed, it, score = 1.0, alternatives = emptyList()) }
+        }
+
         val queries = listOfNotNull(parsed.cjkTitle, parsed.latinTitle, parsed.title)
             .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
         val candidates = LinkedHashMap<Int, TmdbSearchResult>()
@@ -61,8 +70,26 @@ class MediaMatcher(private val tmdb: TmdbClient) {
         return r
     }
 
+    private suspend fun lookup(type: MediaType, id: Int): TmdbSearchResult? =
+        byId.getOrPut("$type/$id") {
+            runCatching {
+                if (type == MediaType.TV) tmdb.tv(id).let {
+                    TmdbSearchResult(it.id, MediaType.TV, it.name, it.originalName, it.firstAirYear, it.overview,
+                        it.posterPath, it.backdropPath, popularity = 0.0)
+                } else tmdb.movie(id).let {
+                    TmdbSearchResult(it.id, MediaType.MOVIE, it.title, it.originalTitle, it.year, it.overview,
+                        it.posterPath, it.backdropPath, popularity = 0.0)
+                }
+            }
+        }.getOrNull()                         // ID 不存在或网络失败就退回按名字搜索
+
     companion object {
         const val AUTO_ACCEPT = 0.75
+
+        /** {tmdb-123}、[tmdbid=123]、(tmdb=123) 等，取离文件最近的一个 */
+        private val TMDB_TAG = Regex("""(?i)[\[{(]\s*tmdb(?:id)?\s*[=-]\s*(\d+)\s*[\]})]""")
+
+        fun tagId(path: String): Int? = TMDB_TAG.findAll(path).lastOrNull()?.groupValues?.get(1)?.toIntOrNull()
 
         fun score(p: ParsedMedia, c: TmdbSearchResult, queries: List<String>): Double {
             val names = listOfNotNull(c.title, c.originalTitle).map(::norm).filter { it.isNotEmpty() }

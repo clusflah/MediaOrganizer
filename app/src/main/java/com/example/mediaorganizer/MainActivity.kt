@@ -312,8 +312,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果 */
     fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.MATCH) {
+        applyChoice(key, result, applyToSame) ?: return@launchTask
+        refreshPreview()
+    }
+
+    /** 选定匹配后立即整理这一个（同名的其他文件只改匹配，不整理） */
+    fun chooseAndOrganize(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.ORGANIZE) {
+        val newKey = applyChoice(key, result, applyToSame) ?: return@launchTask
+        organizeSingle(newKey)               // 里面的 refreshPreview 会顺带给同名的其他文件生成目标路径
+    }
+
+    /** 改匹配，返回该行的新 key（已整理过的文件位置变了，key 也会变） */
+    private fun applyChoice(key: String, result: TmdbSearchResult, applyToSame: Boolean): String? {
         val i = rows.indexOfFirst { it.key == key }
-        if (i < 0) return@launchTask
+        if (i < 0) return null
         val group = rows[i].groupKey
         var n = 0
         for (j in rows.indices) {
@@ -325,7 +337,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         status = if (n > 1) "已将 $n 个文件匹配为「${result.title}」" else "已匹配为「${result.title}」"
-        refreshPreview()
+        return rows[i].key
     }
 
     /** 接受当前推荐的匹配 */
@@ -418,9 +430,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun execute() = launchTask(Task.ORGANIZE) { runOrganize(organizable(), appendUndo = false) }
 
     /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
-    fun organizeOne(key: String) = launchTask(Task.ORGANIZE) {
+    fun organizeOne(key: String) = launchTask(Task.ORGANIZE) { organizeSingle(key) }
+
+    private suspend fun organizeSingle(key: String) {
         val i = rows.indexOfFirst { it.key == key }
-        if (i < 0 || rows[i].chosen == null || rows[i].match.file == null) return@launchTask
+        if (i < 0 || rows[i].chosen == null || rows[i].match.file == null) return
         rows[i] = rows[i].copy(confirmed = true, excluded = false, outcome = null, plan = null)
         refreshPreview()
         // 并入上一批的撤销记录，不覆盖之前的批量整理
