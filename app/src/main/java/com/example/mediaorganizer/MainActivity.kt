@@ -302,6 +302,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun MediaRow.isOpenForMatch() = outcome == null && !excluded && !confirmed
 
+    /** 已经移动过的文件，把来源路径换成它现在所在的位置，才能再次整理 */
+    private fun MediaRow.atCurrentLocation(): MediaRow {
+        val p = plan ?: return this
+        val f = match.file ?: return this
+        if (outcome != "ok") return this
+        return copy(match = match.copy(file = f.copy(path = p.targetPath, name = p.targetName)))
+    }
+
     /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果 */
     fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.MATCH) {
         val i = rows.indexOfFirst { it.key == key }
@@ -311,7 +319,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         for (j in rows.indices) {
             val r = rows[j]
             if (j == i || (applyToSame && r.groupKey == group && r.isOpenForMatch())) {
-                rows[j] = r.copy(chosen = result, confirmed = true, plan = null, outcome = null)   // 失败的改匹配后可重试
+                // 失败的改匹配后可重试；已整理的从当前位置出发重新整理
+                rows[j] = r.atCurrentLocation().copy(chosen = result, confirmed = true, plan = null, outcome = null)
                 n++
             }
         }

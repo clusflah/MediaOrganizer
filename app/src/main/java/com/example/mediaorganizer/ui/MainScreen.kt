@@ -715,7 +715,9 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     var searchError by remember { mutableStateOf<String?>(null) }
     val sameCount = remember(row.key) { vm.sameGroupPendingCount(row.key) }
     var applySame by remember(row.key) { mutableStateOf(true) }
-    val canChange = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
+    // 已完成的也能改匹配（选错了可以纠正），改完回到「可整理」再整理一次
+    val canChange = !vm.busy
+    val canExclude = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
 
     fun doSearch() {
         if (query.isBlank()) return
@@ -756,6 +758,12 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     Spacer(Modifier.height(12.dp))
                 }
                 if (canChange) item {
+                    if (row.category == RowCategory.DONE) Text(
+                        "这个文件已整理过。改选匹配后会回到「可整理」，再点整理会从当前位置移到新目标；" +
+                            "原文件夹里已生成的 NFO 和图片不会自动删除。",
+                        style = MaterialTheme.typography.bodySmall, color = Orange,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, singleLine = true,
                         label = { Text("在 TMDB 搜索") },
@@ -813,7 +821,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         },
         dismissButton = {
             Row {
-                if (canChange) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
+                if (canExclude) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
                     Text(if (row.excluded) "取消排除" else "排除")
                 }
                 if (canChange && row.category == RowCategory.PENDING) TextButton(onClick = onDismiss) { Text("关闭") }
