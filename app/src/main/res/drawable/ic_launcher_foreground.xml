@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 胶片 + 播放三角 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#FFFFFF"
+        android:pathData="M34,36h40a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-40a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
+    <path android:fillColor="#3949AB" android:pathData="M48,45l14,9 -14,9z" />
+    <path android:fillColor="#3949AB"
+        android:pathData="M34,40h4v4h-4zM34,50h4v4h-4zM34,60h4v4h-4zM70,40h4v4h-4zM70,50h4v4h-4zM70,60h4v4h-4z" />
+</vector>
