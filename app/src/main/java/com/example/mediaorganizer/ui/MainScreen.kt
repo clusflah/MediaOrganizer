@@ -145,11 +145,15 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
     if (askUndo) vm.undoSummary()?.let { sum ->
         UndoConfirmDialog(sum, onConfirm = { askUndo = false; vm.undo() }, onDismiss = { askUndo = false })
     }
-    if (askOrganize) OrganizeConfirmDialog(
-        vm.organizeSummary(),
-        onConfirm = { askOrganize = false; vm.execute() },
-        onDismiss = { askOrganize = false },
-    )
+    if (askOrganize) {
+        val summary = remember { vm.organizeSummary() }
+        OrganizeConfirmDialog(
+            summary, s,
+            onConfirm = { askOrganize = false; vm.execute() },
+            onDismiss = { askOrganize = false },
+            onOpenRow = { askOrganize = false; detailKey = it },
+        )
+    }
 }
 
 // ============================ 顶栏 ============================
@@ -537,25 +541,101 @@ private fun BottomBar(
 
 // ============================ 对话框 ============================
 
+private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆对话框
+
+/** 整理前确认：每一类都能展开看具体文件，点文件进详情改匹配或排除 */
 @Composable
-private fun OrganizeConfirmDialog(sum: OrganizeSummary, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+private fun OrganizeConfirmDialog(
+    sum: OrganizeSummary, s: AppSettings,
+    onConfirm: () -> Unit, onDismiss: () -> Unit, onOpenRow: (String) -> Unit,
+) {
+    var open by remember { mutableStateOf(if (sum.duplicates.isNotEmpty()) "dup" else "") }
+    fun toggle(id: String) { open = if (open == id) "" else id }
+    val dupCount = sum.duplicates.sumOf { it.second.size }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text("整理 ${sum.total} 个文件？") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                if (sum.moves > 0) Text("移动到影视库：${sum.moves} 个")
-                if (sum.renames > 0) Text("原地改名：${sum.renames} 个")
-                if (sum.unchanged > 0) Text("已在目标位置，不动：${sum.unchanged} 个")
-                if (sum.duplicates > 0) Text("目标重名：${sum.duplicates} 个（只整理其中一个，其余跳过）", color = Orange)
-                if (sum.notIncluded > 0) Text("待确认、未匹配和已排除的 ${sum.notIncluded} 个不受影响", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("目标已存在的文件不会被覆盖；整理后可在菜单里撤销。", style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 6.dp))
+            LazyColumn {
+                if (sum.duplicates.isNotEmpty()) {
+                    item { GroupHeader("目标重名", dupCount, Orange, open == "dup") { toggle("dup") } }
+                    if (open == "dup") {
+                        item {
+                            Text("每组只有第一个会整理，其余标为失败。点文件可改匹配或排除。",
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(bottom = 4.dp))
+                        }
+                        sum.duplicates.take(LIST_LIMIT).forEach { (target, list) ->
+                            item {
+                                Text("→ " + shortTarget(target, s), style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 6.dp))
+                            }
+                            items(list) { m ->
+                                MoveLine(m, s, showTarget = false, mark = if (m == list.first()) "整理" else "跳过") { onOpenRow(m.key) }
+                            }
+                        }
+                    }
+                }
+                moveGroup("移动到影视库", "move", sum.moves, s, open, ::toggle, onOpenRow)
+                moveGroup("原地改名", "rename", sum.renames, s, open, ::toggle, onOpenRow)
+                moveGroup("已在目标位置，不动", "same", sum.unchanged, s, open, ::toggle, onOpenRow)
+                item {
+                    if (sum.notIncluded > 0) Text(
+                        "待确认、未匹配和已排除的 ${sum.notIncluded} 个不受影响",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                    Text("目标已存在的文件不会被覆盖；整理后可在菜单里撤销。", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 6.dp))
+                }
             }
         },
         confirmButton = { Button(onClick = onConfirm) { Text("开始整理") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
+}
+
+private fun androidx.compose.foundation.lazy.LazyListScope.moveGroup(
+    title: String, id: String, list: List<PlannedMove>, s: AppSettings,
+    open: String, toggle: (String) -> Unit, onOpenRow: (String) -> Unit,
+) {
+    if (list.isEmpty()) return
+    item(key = "h-$id") { GroupHeader(title, list.size, Color.Unspecified, open == id) { toggle(id) } }
+    if (open != id) return
+    items(list.take(LIST_LIMIT), key = { "$id-${it.key}" }) { m -> MoveLine(m, s, showTarget = id != "same", mark = null) { onOpenRow(m.key) } }
+    if (list.size > LIST_LIMIT) item {
+        Text("…还有 ${list.size - LIST_LIMIT} 个", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+    }
+}
+
+@Composable
+private fun GroupHeader(title: String, count: Int, color: Color, expanded: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable(onClick = onClick).padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("$title：$count 个", color = color, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
+        Text(if (expanded) "收起" else "查看", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
+    }
+}
+
+@Composable
+private fun MoveLine(m: PlannedMove, s: AppSettings, showTarget: Boolean, mark: String?, onClick: () -> Unit) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).clickable(onClick = onClick)
+            .padding(start = 8.dp, top = 4.dp, bottom = 4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (mark != null) {
+                Pill(mark, if (mark == "整理") Green else Gray)
+                Spacer(Modifier.width(6.dp))
+            }
+            Text(m.from, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        }
+        if (showTarget) Text("→ " + shortTarget(m.to, s), style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.primary, maxLines = 2, overflow = TextOverflow.Ellipsis)
+    }
 }
 
 private fun formatTime(ms: Long): String =
@@ -597,6 +677,32 @@ private fun InfoLine(label: String, value: String, color: Color = Color.Unspecif
     }
 }
 
+/** 详情里对单个文件直接整理 / 刮削 */
+@Composable
+private fun RowActions(vm: MainViewModel, row: MediaRow, onDone: () -> Unit) {
+    val cat = row.category
+    val canOrganize = row.chosen != null && row.match.file != null &&
+        cat in setOf(RowCategory.READY, RowCategory.PENDING, RowCategory.FAILED, RowCategory.EXCLUDED)
+    val canScrape = cat == RowCategory.DONE
+    if (!canOrganize && !canScrape) return
+    Row(Modifier.padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (canOrganize) Button(onClick = { vm.organizeOne(row.key); onDone() }, enabled = !vm.busy) {
+            Text(when (cat) {
+                RowCategory.PENDING -> "确认并整理"
+                RowCategory.FAILED -> "重试整理"
+                else -> "整理此项"
+            } + if (vm.settings.autoScrape) "+刮削" else "")
+        }
+        if (canScrape) OutlinedButton(onClick = { vm.scrapeOne(row.key); onDone() }, enabled = !vm.busy) {
+            Text(if (vm.settings.autoScrape) "重新刮削" else "刮削此项")
+        }
+    }
+    if (canOrganize) Text(
+        "单独整理会并入「撤销上次整理」的记录",
+        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+    )
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> Unit) {
@@ -609,7 +715,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     var searchError by remember { mutableStateOf<String?>(null) }
     val sameCount = remember(row.key) { vm.sameGroupPendingCount(row.key) }
     var applySame by remember(row.key) { mutableStateOf(true) }
-    val canChange = row.outcome == null && !vm.busy
+    val canChange = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
 
     fun doSearch() {
         if (query.isBlank()) return
@@ -646,6 +752,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     }
                     row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
+                    RowActions(vm, row, onDone = onDismiss)
                     Spacer(Modifier.height(12.dp))
                 }
                 if (canChange) item {

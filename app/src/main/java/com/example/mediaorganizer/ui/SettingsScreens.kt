@@ -322,11 +322,16 @@ fun LivePreview(settings: AppSettings, isTv: Boolean, showFiles: Boolean) {
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(if (isTv) "剧集预览" else "电影预览", fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
-                SingleChoiceSegmentedButtonRow {
-                    SegmentedButton(view == 0, { view = 0 }, SegmentedButtonDefaults.itemShape(0, 2)) { Text("路径", fontSize = 12.sp) }
-                    SegmentedButton(view == 1, { view = 1 }, SegmentedButtonDefaults.itemShape(1, 2)) { Text("生成文件", fontSize = 12.sp) }
+            Text(if (isTv) "剧集预览" else "电影预览", fontWeight = FontWeight.Bold)
+            Spacer(Modifier.height(8.dp))
+            // 独占一行、去掉勾选图标：两个按钮等宽，文字不会被挤成两行
+            SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth().height(36.dp)) {
+                listOf("整理后路径", "生成文件").forEachIndexed { i, label ->
+                    SegmentedButton(
+                        selected = view == i, onClick = { view = i },
+                        shape = SegmentedButtonDefaults.itemShape(i, 2),
+                        icon = {},
+                    ) { Text(label, fontSize = 13.sp, maxLines = 1) }
                 }
             }
             Spacer(Modifier.height(10.dp))

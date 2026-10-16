@@ -123,11 +123,19 @@ data class UndoSummary(
     val samples: List<Pair<String, String>>, // 现在位置 -> 还原到
 )
 
+/** 整理计划里的一条：from -> to */
+data class PlannedMove(val key: String, val from: String, val to: String)
+
 /** 「开始整理」前给用户看的汇总 */
 data class OrganizeSummary(
-    val total: Int, val moves: Int, val renames: Int, val unchanged: Int,
-    val duplicates: Int, val notIncluded: Int,
-)
+    val moves: List<PlannedMove>,                         // 换目录
+    val renames: List<PlannedMove>,                       // 同目录改名
+    val unchanged: List<PlannedMove>,                     // 已经在目标位置
+    val duplicates: List<Pair<String, List<PlannedMove>>>, // 目标路径 -> 撞名的文件（第一个会整理）
+    val notIncluded: Int,
+) {
+    val total: Int get() = moves.size + renames.size + unchanged.size
+}
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SettingsRepository(app)
@@ -303,7 +311,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         for (j in rows.indices) {
             val r = rows[j]
             if (j == i || (applyToSame && r.groupKey == group && r.isOpenForMatch())) {
-                rows[j] = r.copy(chosen = result, confirmed = true, plan = null)
+                rows[j] = r.copy(chosen = result, confirmed = true, plan = null, outcome = null)   // 失败的改匹配后可重试
                 n++
             }
         }
@@ -331,8 +339,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         var n = 0
         for (i in rows.indices) {
             val r = rows[i]
-            if (r.key in keys && r.outcome == null && r.excluded != excluded) {
-                rows[i] = r.copy(excluded = excluded, plan = null)
+            if (r.key in keys && (r.outcome == null || r.category == RowCategory.FAILED) && r.excluded != excluded) {
+                rows[i] = r.copy(excluded = excluded, plan = null, outcome = null)
                 n++
             }
         }
@@ -384,23 +392,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun organizableCount() = rows.count { it.category == RowCategory.READY && it.plan != null }
 
     fun organizeSummary(): OrganizeSummary {
-        val plans = organizable().map { it.value.plan!! }
-        val dupTargets = plans.groupingBy { it.targetPath }.eachCount().filterValues { it > 1 }.keys
-        val unchanged = plans.count { it.unchanged }
-        val moves = plans.count { !it.unchanged && parentPath(it.item.file.path) != normalizePath(it.targetDir) }
+        val items = organizable().map { (_, r) -> r.plan!!.let { r.key to it } }
+        fun toMove(p: Pair<String, RenamePlan>) = PlannedMove(p.first, p.second.item.file.path, p.second.targetPath)
+        val (unchanged, changed) = items.partition { it.second.unchanged }
+        val (moves, renames) = changed.partition { parentPath(it.second.item.file.path) != normalizePath(it.second.targetDir) }
         return OrganizeSummary(
-            total = plans.size,
-            moves = moves,
-            renames = plans.size - unchanged - moves,
-            unchanged = unchanged,
-            duplicates = plans.count { it.targetPath in dupTargets },
+            moves = moves.map(::toMove),
+            renames = renames.map(::toMove),
+            unchanged = unchanged.map(::toMove),
+            duplicates = changed.groupBy { it.second.targetPath }.filterValues { it.size > 1 }
+                .map { (target, list) -> target to list.map(::toMove) },
             notIncluded = rows.count { it.category in setOf(RowCategory.PENDING, RowCategory.UNMATCHED, RowCategory.EXCLUDED) },
         )
     }
 
-    fun execute() = launchTask(Task.ORGANIZE) {
-        val s = storage ?: return@launchTask
-        val indexed = organizable()
+    fun execute() = launchTask(Task.ORGANIZE) { runOrganize(organizable(), appendUndo = false) }
+
+    /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
+    fun organizeOne(key: String) = launchTask(Task.ORGANIZE) {
+        val i = rows.indexOfFirst { it.key == key }
+        if (i < 0 || rows[i].chosen == null || rows[i].match.file == null) return@launchTask
+        rows[i] = rows[i].copy(confirmed = true, excluded = false, outcome = null, plan = null)
+        refreshPreview()
+        // 并入上一批的撤销记录，不覆盖之前的批量整理
+        runOrganize(listOf(IndexedValue(i, rows[i])).filter { it.value.plan != null }, appendUndo = true)
+    }
+
+    private suspend fun runOrganize(indexed: List<IndexedValue<MediaRow>>, appendUndo: Boolean) {
+        val s = storage ?: return
+        if (indexed.isEmpty()) return
         val report = RenameExecutor(s, storageId).execute(indexed.map { it.value.plan!! }) { done, total, _ ->
             progress = done to total
             status = "整理中 $done/$total"
@@ -408,14 +428,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         indexed.zip(report.outcomes).forEach { (iv, o) ->
             rows[iv.index] = rows[iv.index].copy(outcome = if (o.skipped) "无需改动" else o.error ?: "ok")
         }
-        rememberOps(report.operations, append = false)    // 新批次，覆盖上一批的撤销记录
-        status = "整理完成：成功 ${report.succeeded}，失败 ${report.failed}"
-        if (report.failed > 0) filter = RowCategory.FAILED
+        rememberOps(report.operations, append = appendUndo)
+        status = if (indexed.size == 1) {
+            val o = report.outcomes.single()
+            when {
+                o.error != null -> "整理失败：${o.error}"
+                o.skipped -> "已在目标位置，无需改动"
+                else -> "已整理到 ${o.plan.targetPath}"
+            }
+        } else "整理完成：成功 ${report.succeeded}，失败 ${report.failed}"
+        if (indexed.size > 1 && report.failed > 0) filter = RowCategory.FAILED
 
         if (settings.autoScrape) {
             task = Task.SCRAPE
             runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；")
         }
+    }
+
+    fun scrapeOne(key: String) = launchTask(Task.SCRAPE) {
+        val s = storage ?: return@launchTask
+        val plan = rows.firstOrNull { it.key == key && it.category == RowCategory.DONE }?.plan ?: return@launchTask
+        runScrape(s, listOf(plan))
     }
 
     fun scrapeOnly() = launchTask(Task.SCRAPE) {
