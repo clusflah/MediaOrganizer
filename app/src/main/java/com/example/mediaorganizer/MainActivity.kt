@@ -6,22 +6,15 @@ import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -35,12 +28,17 @@ import com.example.mediaorganizer.storage.OperationLog
 import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.storage.StorageException
 import com.example.mediaorganizer.storage.WebDavStorage
+import com.example.mediaorganizer.storage.normalizePath
+import com.example.mediaorganizer.storage.parentPath
+import com.example.mediaorganizer.ui.MainScreen
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
-import com.example.mediaorganizer.ui.SettingField
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.net.ConnectException
 import java.net.SocketTimeoutException
@@ -74,18 +72,51 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
 
 // ============================ ViewModel ============================
 
+/** 列表里每个文件所处的状态，枚举顺序 = 「全部」视图里的排序（要处理的排前面） */
+enum class RowCategory(val label: String) {
+    PENDING("待确认"), UNMATCHED("未匹配"), FAILED("失败"), READY("可整理"), DONE("已完成"), EXCLUDED("已排除"),
+}
+
 data class MediaRow(
     val match: MatchResult,
     val chosen: TmdbSearchResult?,
     val confirmed: Boolean,
     val plan: RenamePlan? = null,
     val outcome: String? = null,     // null=未执行, "ok", "无需改动", 或错误信息
-)
+    val excluded: Boolean = false,   // 用户选择不整理
+) {
+    val key: String get() = match.file?.path ?: match.parsed.rawName
+
+    val category: RowCategory get() = when {
+        outcome == "ok" || outcome == "无需改动" -> RowCategory.DONE
+        outcome != null -> RowCategory.FAILED
+        excluded -> RowCategory.EXCLUDED
+        chosen == null -> RowCategory.UNMATCHED
+        !confirmed -> RowCategory.PENDING
+        else -> RowCategory.READY
+    }
+
+    val isTv: Boolean get() = chosen?.let { it.type == MediaType.TV } ?: match.parsed.isEpisode
+
+    /** 同一部剧的各集、同一部电影的不同版本解析出的片名相同，可以一起改匹配 */
+    val groupKey: String get() =
+        (if (match.parsed.isEpisode) "tv|" else "mv|") + match.parsed.title.lowercase().filter { it.isLetterOrDigit() }
+}
 
 /** 连接测试的一项结果 */
 data class ConnCheck(val label: String, val level: Level, val detail: String) {
     enum class Level { OK, WARN, FAIL }
 }
+
+enum class ConnState { UNTESTED, OK, FAIL }
+
+enum class Task { SCAN, TEST, MATCH, ORGANIZE, SCRAPE, UNDO }
+
+/** 「开始整理」前给用户看的汇总 */
+data class OrganizeSummary(
+    val total: Int, val moves: Int, val renames: Int, val unchanged: Int,
+    val duplicates: Int, val notIncluded: Int,
+)
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SettingsRepository(app)
@@ -98,9 +129,27 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     val rows = mutableStateListOf<MediaRow>()
     var status by mutableStateOf("")
-    var busy by mutableStateOf(false)
     var canUndo by mutableStateOf(false)
+
+    /** 当前在跑的任务，null = 空闲 */
+    var task by mutableStateOf<Task?>(null)
+        private set
+    val busy: Boolean get() = task != null
+    /** 整理 / 刮削的进度 done to total */
+    var progress by mutableStateOf<Pair<Int, Int>?>(null)
+        private set
+
+    var connState by mutableStateOf(ConnState.UNTESTED)
+        private set
+    var connMessage by mutableStateOf("")
+        private set
     var connChecks by mutableStateOf<List<ConnCheck>>(emptyList())
+        private set
+
+    // 列表筛选与多选
+    var filter by mutableStateOf<RowCategory?>(null)     // null = 全部
+    var typeFilter by mutableStateOf<MediaType?>(null)   // null = 电影和剧集
+    var selected by mutableStateOf<Set<String>>(emptySet())
         private set
 
     private var storage: WebDavStorage? = null
@@ -108,13 +157,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private var details: TmdbDetails? = null
     private var lastOps: List<FileOperation> = emptyList()
     private var saveJob: Job? = null
+    private var taskJob: Job? = null
 
     init {
         viewModelScope.launch {
             settings = runCatching { repo.load() }.getOrDefault(AppSettings())
             lastOps = opLog.load()               // 上次没撤销的批次，重启后仍可撤销
             canUndo = lastOps.isNotEmpty()
-            if (canUndo) status = "上次整理了 ${lastOps.count { it.type == FileOperation.Type.MOVE }} 个文件，可点「撤销」还原"
+            if (canUndo) status = "上次整理了 ${lastOps.count { it.type == FileOperation.Type.MOVE }} 个文件，可在菜单里撤销"
             loaded = true
         }
     }
@@ -124,7 +174,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val old = settings
         if (new.webdavUrl != old.webdavUrl || new.username != old.username || new.password != old.password ||
             new.scanDir != old.scanDir || new.movieRoot != old.movieRoot || new.tvRoot != old.tvRoot
-        ) connChecks = emptyList()          // 连接信息改了，旧的测试结果作废
+        ) {                                  // 连接信息改了，旧的测试结果作废
+            connChecks = emptyList()
+            connState = ConnState.UNTESTED
+            connMessage = ""
+        }
         settings = new
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
@@ -139,59 +193,285 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         WebDavStorage(it.webdavUrl.trim(), it.username.ifBlank { null }, it.password.ifBlank { null })
     }
 
+    private fun newTmdb() = settings.let {
+        TmdbClient(it.tmdbToken.trim(), apiBase = it.tmdbApiBase.trimEnd('/'), imageBase = it.tmdbImageBase.trimEnd('/'))
+    }
+
     private fun rememberOps(ops: List<FileOperation>, append: Boolean) {
         lastOps = if (append) lastOps + ops else ops
         opLog.save(lastOps)
         canUndo = lastOps.isNotEmpty()
     }
 
-    private fun launchBusy(block: suspend () -> Unit) {
-        if (busy) return
-        busy = true
-        viewModelScope.launch {
-            try { block() } catch (e: Exception) { status = "出错：${e.message}" } finally { busy = false }
+    private fun launchTask(t: Task, block: suspend () -> Unit) {
+        if (task != null) return
+        task = t
+        progress = null
+        taskJob = viewModelScope.launch {
+            try {
+                block()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                status = "出错：${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                task = null; progress = null; taskJob = null
+            }
         }
     }
 
-    fun scan() = launchBusy {
+    // ---------- 扫描 ----------
+
+    fun scan() = launchTask(Task.SCAN) {
         val s0 = settings
-        if (s0.tmdbToken.isBlank()) { status = "请先在「刮削设置」里填写 TMDB 令牌"; return@launchBusy }
+        if (s0.tmdbToken.isBlank()) { status = "请先在「刮削设置」里填写 TMDB 令牌"; return@launchTask }
         status = "连接中…"
-        val s = newStorage()
-        s.connect()
-        val t = TmdbClient(s0.tmdbToken.trim(), apiBase = s0.tmdbApiBase.trimEnd('/'), imageBase = s0.tmdbImageBase.trimEnd('/'))
+        val s = try {
+            newStorage().also { it.connect() }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            connState = ConnState.FAIL
+            connMessage = connErrorText(e)
+            status = "连接失败：$connMessage"
+            return@launchTask
+        }
+        connState = ConnState.OK
+        connMessage = ""
+        val t = newTmdb()
         storage = s; tmdb = t; details = TmdbDetails(t)
         rows.clear()
+        selected = emptySet()
+        filter = null
 
-        MediaScanner(s, MediaMatcher(t)).scan(s0.scanDir).collect { m ->
-            rows += MediaRow(m, m.best, confirmed = !m.needsConfirm)
-            status = "已扫描 ${rows.size} 个视频…"
+        var stopped = false
+        try {
+            MediaScanner(s, MediaMatcher(t)).scan(s0.scanDir).collect { m ->
+                rows += MediaRow(m, m.best, confirmed = !m.needsConfirm)
+                status = "已扫描 ${rows.size} 个视频…"
+            }
+        } catch (e: CancellationException) {
+            stopped = true                   // 用户点了「停止」，保留已扫到的
         }
-        refreshPreview()
-        val pending = rows.count { !it.confirmed }
-        status = "共 ${rows.size} 个视频" + if (pending > 0) "，$pending 个待确认（点击条目选择）" else ""
+        withContext(NonCancellable) {
+            refreshPreview()
+            val pending = rows.count { it.category == RowCategory.PENDING }
+            filter = if (pending > 0) RowCategory.PENDING else null
+            status = (if (stopped) "已停止扫描，" else "") + "共 ${rows.size} 个视频" +
+                if (pending > 0) "，$pending 个待确认" else ""
+        }
     }
 
+    fun stopScan() {
+        if (task == Task.SCAN) taskJob?.cancel()
+    }
+
+    // ---------- 匹配确认 ----------
+
+    fun sameGroupPendingCount(key: String): Int {
+        val row = rows.firstOrNull { it.key == key } ?: return 0
+        return rows.count { it.key != key && it.groupKey == row.groupKey && it.isOpenForMatch() }
+    }
+
+    private fun MediaRow.isOpenForMatch() = outcome == null && !excluded && !confirmed
+
+    /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果 */
+    fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.MATCH) {
+        val i = rows.indexOfFirst { it.key == key }
+        if (i < 0) return@launchTask
+        val group = rows[i].groupKey
+        var n = 0
+        for (j in rows.indices) {
+            val r = rows[j]
+            if (j == i || (applyToSame && r.groupKey == group && r.isOpenForMatch())) {
+                rows[j] = r.copy(chosen = result, confirmed = true, plan = null)
+                n++
+            }
+        }
+        status = if (n > 1) "已将 $n 个文件匹配为「${result.title}」" else "已匹配为「${result.title}」"
+        refreshPreview()
+    }
+
+    /** 接受当前推荐的匹配 */
+    fun confirm(keys: Set<String>) = launchTask(Task.MATCH) {
+        var n = 0
+        for (i in rows.indices) {
+            val r = rows[i]
+            if (r.key in keys && r.chosen != null && r.isOpenForMatch()) {
+                rows[i] = r.copy(confirmed = true, plan = null)
+                n++
+            }
+        }
+        selected = emptySet()
+        status = "已确认 $n 个"
+        refreshPreview()
+    }
+
+    fun setExcluded(keys: Set<String>, excluded: Boolean) {
+        if (busy) return
+        var n = 0
+        for (i in rows.indices) {
+            val r = rows[i]
+            if (r.key in keys && r.outcome == null && r.excluded != excluded) {
+                rows[i] = r.copy(excluded = excluded, plan = null)
+                n++
+            }
+        }
+        selected = emptySet()
+        status = if (excluded) "已排除 $n 个，整理时会跳过" else "已恢复 $n 个"
+        if (!excluded) refreshPreviewAsync(all = false)
+    }
+
+    suspend fun searchTmdb(query: String, tv: Boolean): List<TmdbSearchResult> {
+        val t = tmdb ?: newTmdb().also { tmdb = it }
+        return if (tv) t.searchTv(query) else t.searchMovie(query)
+    }
+
+    // ---------- 多选 ----------
+
+    fun toggleSelect(key: String) {
+        selected = if (key in selected) selected - key else selected + key
+    }
+
+    fun selectAll(keys: Collection<String>) { selected = selected + keys }
+
+    fun clearSelection() { selected = emptySet() }
+
+    // ---------- 预览 ----------
+
+    fun refreshPreviewAsync(all: Boolean = true) = launchTask(Task.MATCH) { refreshPreview(all) }
+
+    /** 为已确认的条目生成目标路径；all=false 时只算还没有路径的（改匹配后不必重算上千条） */
+    private suspend fun refreshPreview(all: Boolean = false) {
+        val d = details ?: return
+        val s = settings
+        val planner = RenamePlanner(d, LibraryRoots(s.movieRoot, s.tvRoot))
+        val ready = rows.withIndex().filter { (_, r) ->
+            r.category == RowCategory.READY && r.match.file != null && (all || r.plan == null)
+        }
+        if (ready.isEmpty()) return
+        val plans = planner.plan(
+            ready.map { (_, r) -> RenameItem(r.match.file!!, r.match.parsed, r.chosen!!) },
+            movieConfig = s.movieNaming,
+            tvConfig = s.tvNaming,
+        )
+        ready.zip(plans).forEach { (iv, plan) -> rows[iv.index] = rows[iv.index].copy(plan = plan) }
+    }
+
+    // ---------- 整理 / 刮削 / 撤销 ----------
+
+    private fun organizable() = rows.withIndex().filter { it.value.category == RowCategory.READY && it.value.plan != null }
+
+    fun organizableCount() = rows.count { it.category == RowCategory.READY && it.plan != null }
+
+    fun organizeSummary(): OrganizeSummary {
+        val plans = organizable().map { it.value.plan!! }
+        val dupTargets = plans.groupingBy { it.targetPath }.eachCount().filterValues { it > 1 }.keys
+        val unchanged = plans.count { it.unchanged }
+        val moves = plans.count { !it.unchanged && parentPath(it.item.file.path) != normalizePath(it.targetDir) }
+        return OrganizeSummary(
+            total = plans.size,
+            moves = moves,
+            renames = plans.size - unchanged - moves,
+            unchanged = unchanged,
+            duplicates = plans.count { it.targetPath in dupTargets },
+            notIncluded = rows.count { it.category in setOf(RowCategory.PENDING, RowCategory.UNMATCHED, RowCategory.EXCLUDED) },
+        )
+    }
+
+    fun execute() = launchTask(Task.ORGANIZE) {
+        val s = storage ?: return@launchTask
+        val indexed = organizable()
+        val report = RenameExecutor(s, storageId).execute(indexed.map { it.value.plan!! }) { done, total, _ ->
+            progress = done to total
+            status = "整理中 $done/$total"
+        }
+        indexed.zip(report.outcomes).forEach { (iv, o) ->
+            rows[iv.index] = rows[iv.index].copy(outcome = if (o.skipped) "无需改动" else o.error ?: "ok")
+        }
+        rememberOps(report.operations, append = false)    // 新批次，覆盖上一批的撤销记录
+        status = "整理完成：成功 ${report.succeeded}，失败 ${report.failed}"
+        if (report.failed > 0) filter = RowCategory.FAILED
+
+        if (settings.autoScrape) {
+            task = Task.SCRAPE
+            runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；")
+        }
+    }
+
+    fun scrapeOnly() = launchTask(Task.SCRAPE) {
+        val s = storage ?: return@launchTask
+        val plans = rows.filter { it.category == RowCategory.DONE }.mapNotNull { it.plan }
+        if (plans.isEmpty()) { status = "没有已整理的条目可刮削"; return@launchTask }
+        runScrape(s, plans)
+    }
+
+    private suspend fun runScrape(s: WebDavStorage, plans: List<RenamePlan>, prefix: String = "") {
+        val d = details ?: return
+        val t = tmdb ?: return
+        progress = null
+        val report = Scraper(s, d, TmdbScrapeSource(t), storageId).scrape(plans, settings.scrape) { done, total ->
+            progress = done to total
+            status = "${prefix}刮削中 $done/$total"
+        }
+        rememberOps(report.operations, append = true)     // 撤销时一并删除新写入的 NFO 和图片
+        status = "${prefix}刮削：写入 ${report.written}，跳过 ${report.skipped}" +
+            if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
+    }
+
+    fun undo() = launchTask(Task.UNDO) {
+        val ops = lastOps
+        if (ops.isEmpty()) return@launchTask
+        val opsStorage = ops.first().storageId
+        if (opsStorage != storageId) {
+            status = "撤销记录属于 ${opsStorage.removePrefix("webdav:")}，与当前连接不一致，请先改回原连接"
+            return@launchTask
+        }
+        status = "撤销中…"
+        val s = storage ?: newStorage().also { it.connect(); storage = it }   // 重启后还没扫描也能撤销
+        val r = RenameExecutor(s, storageId).rollback(ops)
+        rememberOps(emptyList(), append = false)
+        for (i in rows.indices) rows[i] = rows[i].copy(outcome = null)
+        if (details != null) refreshPreview(all = true)
+        status = buildString {
+            append(if (r.failed == 0) "已全部撤销" else "撤销完成，${r.failed} 项失败（${r.errors.first()}）")
+            if (r.keptDirs > 0) append("；${r.keptDirs} 个文件夹里有其他文件，已保留")
+        }
+    }
+
+    // ---------- 连接测试 ----------
+
     /** 依次检查：服务器能否登录 → 扫描目录可读 → 电影库/剧集库可写 */
-    fun testConnection() = launchBusy {
+    fun testConnection() = launchTask(Task.TEST) {
         val s0 = settings
         val checks = mutableListOf<ConnCheck>()
         fun add(c: ConnCheck) { checks += c; connChecks = checks.toList() }
+        fun finish() {
+            val firstFail = checks.firstOrNull { it.level == ConnCheck.Level.FAIL }
+            connState = if (firstFail == null) ConnState.OK else ConnState.FAIL
+            connMessage = firstFail?.let { "${it.label}：${it.detail}" } ?: ""
+            val warns = checks.count { it.level == ConnCheck.Level.WARN }
+            status = when {
+                firstFail != null -> "连接测试：${checks.count { it.level == ConnCheck.Level.FAIL }} 项失败"
+                warns > 0 -> "连接测试通过，$warns 项需留意"
+                else -> "连接测试全部通过"
+            }
+        }
         connChecks = emptyList()
         status = "测试连接中…"
 
         val s = try { newStorage() } catch (e: IllegalArgumentException) {
             add(ConnCheck("服务器", ConnCheck.Level.FAIL, "地址格式不对，应类似 http://192.168.1.10:5005"))
-            status = "连接测试失败"
-            return@launchBusy
+            finish()
+            return@launchTask
         }
         val t0 = SystemClock.elapsedRealtime()
         try {
             s.connect()
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             add(ConnCheck("服务器", ConnCheck.Level.FAIL, connErrorText(e)))
-            status = "连接测试失败"
-            return@launchBusy
+            finish()
+            return@launchTask
         }
         add(ConnCheck("服务器", ConnCheck.Level.OK, "已登录（${SystemClock.elapsedRealtime() - t0} ms）"))
 
@@ -199,14 +479,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         add(checkDir(s, "电影库", s0.movieRoot, library = true))
         if (s0.tvRoot.trim().trimEnd('/') != s0.movieRoot.trim().trimEnd('/'))
             add(checkDir(s, "剧集库", s0.tvRoot, library = true))
-
-        val fails = checks.count { it.level == ConnCheck.Level.FAIL }
-        val warns = checks.count { it.level == ConnCheck.Level.WARN }
-        status = when {
-            fails > 0 -> "连接测试：$fails 项失败"
-            warns > 0 -> "连接测试通过，$warns 项需留意"
-            else -> "连接测试全部通过"
-        }
+        finish()
     }
 
     private suspend fun checkDir(s: WebDavStorage, label: String, dir: String, library: Boolean): ConnCheck {
@@ -222,6 +495,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 else -> checkWritable(s, label, path)
             }
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             ConnCheck(label, ConnCheck.Level.FAIL, connErrorText(e))
         }
     }
@@ -235,6 +509,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         try {
             s.upload(probe.path, ByteArray(0).inputStream(), 0)
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             val why = if (e is StorageException && (e.code == 401 || e.code == 403)) "没有写入权限" else connErrorText(e)
             return ConnCheck(label, ConnCheck.Level.FAIL, "可读取，但$why")
         }
@@ -242,6 +517,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             s.delete(probe)
             ConnCheck(label, ConnCheck.Level.OK, "可读写")
         } catch (e: Exception) {
+            if (e is CancellationException) throw e
             ConnCheck(label, ConnCheck.Level.WARN, "可写入，但测试文件没删掉，请手动删除 ${probe.path}")
         }
     }
@@ -254,238 +530,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             405 -> "该地址不是 WebDAV 服务（HTTP 405），检查端口和路径"
             else -> e.message ?: "HTTP ${e.code}"
         }
+        is IllegalArgumentException -> "地址格式不对，应类似 http://192.168.1.10:5005"
         is UnknownHostException -> "找不到主机，检查地址"
         is ConnectException -> "连不上服务器，检查 IP、端口，以及 WebDAV 服务是否开启"
         is SocketTimeoutException -> "连接超时，检查网络或是否在同一局域网"
         is SSLException -> "HTTPS 握手失败（证书问题？局域网可改用 http）"
         else -> e.message ?: e.javaClass.simpleName
     }
-
-    fun choose(index: Int, result: TmdbSearchResult) = launchBusy {
-        rows[index] = rows[index].copy(chosen = result, confirmed = true)
-        refreshPreview()
-    }
-
-    fun refreshPreviewAsync() = launchBusy { refreshPreview() }
-
-    private suspend fun refreshPreview() {
-        val d = details ?: return
-        val s = settings
-        val planner = RenamePlanner(d, LibraryRoots(s.movieRoot, s.tvRoot))
-        val ready = rows.withIndex().filter { (_, r) ->
-            r.confirmed && r.chosen != null && r.match.file != null && r.outcome == null
-        }
-        val plans = planner.plan(
-            ready.map { (_, r) -> RenameItem(r.match.file!!, r.match.parsed, r.chosen!!) },
-            movieConfig = s.movieNaming,
-            tvConfig = s.tvNaming,
-        )
-        ready.zip(plans).forEach { (iv, plan) -> rows[iv.index] = rows[iv.index].copy(plan = plan) }
-    }
-
-    fun execute() = launchBusy {
-        val s = storage ?: return@launchBusy
-        val indexed = rows.withIndex().filter { it.value.plan != null && it.value.outcome == null }
-        val report = RenameExecutor(s, storageId).execute(indexed.map { it.value.plan!! }) { done, total, _ ->
-            status = "整理中 $done/$total"
-        }
-        indexed.zip(report.outcomes).forEach { (iv, o) ->
-            rows[iv.index] = rows[iv.index].copy(outcome = if (o.skipped) "无需改动" else o.error ?: "ok")
-        }
-        rememberOps(report.operations, append = false)    // 新批次，覆盖上一批的撤销记录
-        status = "整理完成：成功 ${report.succeeded}，失败 ${report.failed}"
-
-        if (settings.autoScrape) {
-            runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；")
-        }
-    }
-
-    fun scrapeOnly() = launchBusy {
-        val s = storage ?: return@launchBusy
-        val plans = rows.filter { it.outcome == "ok" || it.outcome == "无需改动" }.mapNotNull { it.plan }
-        if (plans.isEmpty()) { status = "没有已整理的条目可刮削"; return@launchBusy }
-        runScrape(s, plans)
-    }
-
-    private suspend fun runScrape(s: WebDavStorage, plans: List<RenamePlan>, prefix: String = "") {
-        val d = details ?: return
-        val t = tmdb ?: return
-        val report = Scraper(s, d, TmdbScrapeSource(t), storageId).scrape(plans, settings.scrape) { done, total ->
-            status = "${prefix}刮削中 $done/$total"
-        }
-        rememberOps(report.operations, append = true)     // 撤销时一并删除新写入的 NFO 和图片
-        status = "${prefix}刮削：写入 ${report.written}，跳过 ${report.skipped}" +
-            if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
-    }
-
-    fun undo() = launchBusy {
-        val ops = lastOps
-        if (ops.isEmpty()) return@launchBusy
-        val opsStorage = ops.first().storageId
-        if (opsStorage != storageId) {
-            status = "撤销记录属于 ${opsStorage.removePrefix("webdav:")}，与当前连接不一致，请先改回原连接"
-            return@launchBusy
-        }
-        status = "撤销中…"
-        val s = storage ?: newStorage().also { it.connect(); storage = it }   // 重启后还没扫描也能撤销
-        val r = RenameExecutor(s, storageId).rollback(ops)
-        rememberOps(emptyList(), append = false)
-        for (i in rows.indices) rows[i] = rows[i].copy(outcome = null)
-        if (details != null) refreshPreview()
-        status = buildString {
-            append(if (r.failed == 0) "已全部撤销" else "撤销完成，${r.failed} 项失败（${r.errors.first()}）")
-            if (r.keptDirs > 0) append("；${r.keptDirs} 个文件夹里有其他文件，已保留")
-        }
-    }
-}
-
-// ============================ 主界面 ============================
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
-    var showSettings by rememberSaveable { mutableStateOf(vm.settings.tmdbToken.isBlank()) }
-    var pickIndex by remember { mutableStateOf<Int?>(null) }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("影视整理") },
-                actions = { TextButton(onClick = { showSettings = !showSettings }) { Text(if (showSettings) "收起" else "连接") } },
-            )
-        },
-        bottomBar = {
-            Surface(tonalElevation = 3.dp) {
-                Row(Modifier.fillMaxWidth().padding(12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = vm::scan, enabled = !vm.busy, modifier = Modifier.weight(1f)) { Text("扫描") }
-                    if (vm.canUndo) OutlinedButton(onClick = vm::undo, enabled = !vm.busy, modifier = Modifier.weight(1f)) { Text("撤销") }
-                    if (!vm.settings.autoScrape && vm.rows.any { it.outcome == "ok" || it.outcome == "无需改动" })
-                        OutlinedButton(onClick = vm::scrapeOnly, enabled = !vm.busy, modifier = Modifier.weight(1f)) { Text("刮削") }
-                    Button(
-                        onClick = vm::execute,
-                        enabled = !vm.busy && vm.rows.any { it.plan != null && it.outcome == null },
-                        modifier = Modifier.weight(1f),
-                    ) { Text("开始整理") }
-                }
-            }
-        },
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize()) {
-            if (showSettings) ConnectionPanel(vm)
-
-            Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = openNaming, label = { Text("命名规则 · ${vm.settings.player}") })
-                AssistChip(onClick = openScrape, label = { Text("刮削设置") })
-            }
-
-            Row(Modifier.padding(horizontal = 16.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-                if (vm.busy) { CircularProgressIndicator(Modifier.size(16.dp), strokeWidth = 2.dp); Spacer(Modifier.width(8.dp)) }
-                Text(vm.status, style = MaterialTheme.typography.bodySmall)
-            }
-
-            LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
-                itemsIndexed(vm.rows, key = { _, r -> r.match.file?.path ?: r.match.parsed.rawName }) { i, row ->
-                    PreviewRow(row, onClick = { pickIndex = i })
-                    HorizontalDivider()
-                }
-            }
-        }
-    }
-
-    pickIndex?.let { i ->
-        val row = vm.rows.getOrNull(i)
-        if (row != null) PickDialog(row, onDismiss = { pickIndex = null }, onPick = { vm.choose(i, it); pickIndex = null })
-    }
-}
-
-@Composable
-private fun ConnectionPanel(vm: MainViewModel) {
-    val s = vm.settings
-    fun up(n: AppSettings) = vm.updateSettings(n)
-    Column(
-        Modifier.padding(horizontal = 16.dp).heightIn(max = 460.dp).verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-    ) {
-        SettingField("WebDAV 地址", s.webdavUrl) { up(s.copy(webdavUrl = it)) }
-        SettingField("用户名", s.username) { up(s.copy(username = it)) }
-        SettingField("密码", s.password, password = true) { up(s.copy(password = it)) }
-        SettingField("扫描目录", s.scanDir) { up(s.copy(scanDir = it)) }
-        SettingField("电影库目录", s.movieRoot) { up(s.copy(movieRoot = it)) }
-        SettingField("剧集库目录", s.tvRoot) { up(s.copy(tvRoot = it)) }
-        OutlinedButton(
-            onClick = vm::testConnection,
-            enabled = !vm.busy && s.webdavUrl.isNotBlank(),
-            modifier = Modifier.padding(top = 4.dp),
-        ) { Text("测试连接") }
-        vm.connChecks.forEach { ConnCheckRow(it) }
-        Spacer(Modifier.height(8.dp))
-    }
-}
-
-@Composable
-private fun ConnCheckRow(c: ConnCheck) {
-    val (mark, color) = when (c.level) {
-        ConnCheck.Level.OK -> "✓" to Color(0xFF2E7D32)
-        ConnCheck.Level.WARN -> "!" to Color(0xFFEF6C00)
-        ConnCheck.Level.FAIL -> "✗" to Color(0xFFC62828)
-    }
-    Row(Modifier.padding(vertical = 2.dp)) {
-        Text(mark, color = color, fontWeight = FontWeight.Bold, modifier = Modifier.width(18.dp))
-        Text(c.label, fontWeight = FontWeight.Medium, fontSize = 13.sp, modifier = Modifier.width(64.dp))
-        Text(c.detail, fontSize = 13.sp, color = if (c.level == ConnCheck.Level.OK) Color.Unspecified else color)
-    }
-}
-
-@Composable
-private fun PreviewRow(row: MediaRow, onClick: () -> Unit) {
-    val m = row.match
-    Column(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp)) {
-        Text(m.file?.name ?: m.parsed.rawName, style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis)
-        Spacer(Modifier.height(4.dp))
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            val (tag, color) = when {
-                row.outcome == "ok" -> "完成" to Color(0xFF2E7D32)
-                row.outcome == "无需改动" -> "无需" to Color(0xFF757575)
-                row.outcome != null -> "失败" to Color(0xFFC62828)
-                row.chosen == null -> "未匹配" to Color(0xFFC62828)
-                !row.confirmed -> "待确认" to Color(0xFFEF6C00)
-                else -> "%.0f%%".format(m.score * 100) to Color(0xFF2E7D32)
-            }
-            Text(tag, color = color, fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.width(44.dp))
-            Text(
-                row.plan?.targetPath ?: row.chosen?.let { "${it.title} (${it.year ?: "?"})" } ?: "点击手动选择",
-                style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-            )
-        }
-        val outcome = row.outcome
-        if (outcome != null && outcome != "ok" && outcome != "无需改动") {
-            Text(outcome, color = Color(0xFFC62828), fontSize = 11.sp)
-        }
-    }
-}
-
-@Composable
-private fun PickDialog(row: MediaRow, onDismiss: () -> Unit, onPick: (TmdbSearchResult) -> Unit) {
-    val options = listOfNotNull(row.match.best) + row.match.alternatives
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(row.match.parsed.title, maxLines = 1, overflow = TextOverflow.Ellipsis) },
-        text = {
-            if (options.isEmpty()) Text("TMDB 没有搜到结果")
-            else LazyColumn {
-                itemsIndexed(options) { _, opt ->
-                    Column(Modifier.fillMaxWidth().clickable { onPick(opt) }.padding(vertical = 8.dp)) {
-                        Text("${opt.title} (${opt.year ?: "?"})", fontWeight = FontWeight.Medium)
-                        Text(
-                            listOfNotNull(if (opt.type == MediaType.TV) "剧集" else "电影", opt.originalTitle, "TMDB ${opt.id}")
-                                .joinToString(" · "),
-                            fontSize = 12.sp, color = MaterialTheme.colorScheme.outline,
-                        )
-                    }
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
-    )
 }
