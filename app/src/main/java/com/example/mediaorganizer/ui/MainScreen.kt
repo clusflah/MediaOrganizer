@@ -5,12 +5,10 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -54,6 +52,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
     var editConn by rememberSaveable { mutableStateOf(s.webdavUrl.isBlank() || s.tmdbToken.isBlank()) }
     var detailKey by remember { mutableStateOf<String?>(null) }
     var askOrganize by remember { mutableStateOf(false) }
+    var askUndo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -79,7 +78,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
             if (selecting) SelectionBar(vm, visibleKeys = visible.map { it.key })
             else TopAppBar(
                 title = { Text("影视整理") },
-                actions = { MainMenu(vm, openNaming, openScrape) },
+                actions = { MainMenu(vm, openNaming, openScrape, onUndo = { askUndo = true }) },
             )
         },
         bottomBar = {
@@ -143,6 +142,9 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
     detailKey?.let { key -> vm.rows.firstOrNull { it.key == key } }?.let { row ->
         RowDetailDialog(vm, row, onDismiss = { detailKey = null })
     }
+    if (askUndo) vm.undoSummary()?.let { sum ->
+        UndoConfirmDialog(sum, onConfirm = { askUndo = false; vm.undo() }, onDismiss = { askUndo = false })
+    }
     if (askOrganize) OrganizeConfirmDialog(
         vm.organizeSummary(),
         onConfirm = { askOrganize = false; vm.execute() },
@@ -153,7 +155,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
 // ============================ 顶栏 ============================
 
 @Composable
-private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
+private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, onUndo: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, contentDescription = "更多") }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -162,7 +164,20 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
             DropdownMenuItem(text = { Text("重新扫描") }, enabled = !vm.busy, onClick = { go(vm::scan) })
         if (!vm.settings.autoScrape && vm.rows.any { it.category == RowCategory.DONE })
             DropdownMenuItem(text = { Text("刮削已整理的文件") }, enabled = !vm.busy, onClick = { go(vm::scrapeOnly) })
-        DropdownMenuItem(text = { Text("撤销上次整理") }, enabled = vm.canUndo && !vm.busy, onClick = { go(vm::undo) })
+        val undo = if (vm.canUndo) vm.undoSummary() else null
+        DropdownMenuItem(
+            text = {
+                Column {
+                    Text("撤销上次整理")
+                    if (undo != null) Text(
+                        "${formatTime(undo.time)} · ${undo.moved} 个文件",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                    )
+                }
+            },
+            enabled = undo != null && !vm.busy,
+            onClick = { go(onUndo) },
+        )
         HorizontalDivider()
         DropdownMenuItem(text = { Text("命名规则") }, onClick = { go(openNaming) })
         DropdownMenuItem(text = { Text("刮削设置") }, onClick = { go(openScrape) })
@@ -330,12 +345,13 @@ private fun RowScope.StatTile(label: String, value: Int, color: Color, active: B
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
+/** 换行排列而不是横向滚动：标签都能完整看到，不会被屏幕边缘截断 */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
     Surface(color = MaterialTheme.colorScheme.surface) {
-        Row(
-            Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 4.dp),
+        FlowRow(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(selected = vm.filter == null, onClick = { vm.filter = null }, label = { Text("全部 ${vm.rows.size}") })
@@ -344,8 +360,7 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
                 if (n == 0 && vm.filter != c && c !in setOf(RowCategory.PENDING, RowCategory.READY)) continue
                 FilterChip(selected = vm.filter == c, onClick = { vm.filter = c }, label = { Text("${c.label} $n") })
             }
-            VerticalDivider(Modifier.height(32.dp).align(Alignment.CenterVertically))
-            for ((t, label) in listOf(MediaType.MOVIE to "电影", MediaType.TV to "剧集")) {
+            for ((t, label) in listOf(MediaType.MOVIE to "只看电影", MediaType.TV to "只看剧集")) {
                 FilterChip(
                     selected = vm.typeFilter == t,
                     onClick = { vm.typeFilter = if (vm.typeFilter == t) null else t },
@@ -493,7 +508,11 @@ private fun BottomBar(
                     val ready = vm.organizableCount()
                     if (ready > 0 && pending + unmatched > 0)
                         Text(
-                            "只整理已确认的 $ready 个，其余 ${pending + unmatched} 个可稍后处理",
+                            "本次整理 $ready 个已确认文件；另有 " +
+                                listOfNotNull(
+                                    if (pending > 0) "$pending 个待确认" else null,
+                                    if (unmatched > 0) "$unmatched 个未匹配" else null,
+                                ).joinToString("、") + "，可稍后处理",
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(bottom = 6.dp),
                         )
@@ -535,6 +554,37 @@ private fun OrganizeConfirmDialog(sum: OrganizeSummary, onConfirm: () -> Unit, o
             }
         },
         confirmButton = { Button(onClick = onConfirm) { Text("开始整理") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
+    )
+}
+
+private fun formatTime(ms: Long): String =
+    java.text.SimpleDateFormat("M月d日 HH:mm", java.util.Locale.CHINA).format(java.util.Date(ms))
+
+@Composable
+private fun UndoConfirmDialog(sum: UndoSummary, onConfirm: () -> Unit, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("撤销 ${formatTime(sum.time)} 的整理？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("${sum.moved} 个文件移回原位置")
+                if (sum.created > 0) Text("删除当时新写入的 ${sum.created} 个 NFO / 图片")
+                Text("当时新建、现已为空的文件夹会删除；原有文件和文件夹不受影响。",
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                if (sum.samples.isNotEmpty()) {
+                    Text("例如：", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 6.dp))
+                    sum.samples.forEach { (from, to) ->
+                        Text(from.substringAfterLast('/'), style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("  ↩ $to", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                    if (sum.moved > sum.samples.size) Text("…等 ${sum.moved} 个", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onConfirm) { Text("撤销") } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
     )
 }

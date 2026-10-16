@@ -75,9 +75,11 @@ class RenamePlanner(
         val tvEngine = NamingEngine(tvConfig)
         return items.map { item ->
             val input = buildInput(item)
+            val config = if (input.isEpisode) tvConfig else movieConfig
             val result = (if (input.isEpisode) tvEngine else movieEngine).build(input)
             val dir = when {
-                result.folders.isEmpty() -> parentPath(item.file.path)          // 原地改名
+                config.tmdbTagMode == TmdbTagMode.TAG_ONLY -> parentPath(item.file.path)   // 原地改名
+                // 电影不建独立文件夹时 folders 为空，直接放进电影库根目录
                 input.isEpisode -> joinPath(roots.tvRoot, result.folders.joinToString("/"))
                 else -> joinPath(roots.movieRoot, result.folders.joinToString("/"))
             }

@@ -18,8 +18,8 @@ android {
         applicationId = "com.example.mediaorganizer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "1.3"
+        versionCode = 5
+        versionName = "1.4"
     }
 
     signingConfigs {
@@ -67,4 +67,6 @@ dependencies {
 
     // 设置保存
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    testImplementation("junit:junit:4.13.2")
 }

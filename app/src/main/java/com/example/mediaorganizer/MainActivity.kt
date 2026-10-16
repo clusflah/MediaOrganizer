@@ -65,8 +65,11 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
     }
     when (page) {
         Page.MAIN -> MainScreen(vm, openNaming = { page = Page.NAMING }, openScrape = { page = Page.SCRAPE })
-        Page.NAMING -> NamingSettingsScreen(vm.settings, vm::updateSettings) { page = Page.MAIN; vm.refreshPreviewAsync() }
-        Page.SCRAPE -> ScrapeSettingsScreen(vm.settings, vm::updateSettings) { page = Page.MAIN }
+        Page.NAMING -> NamingSettingsScreen(vm.settings, vm.saved, vm::updateSettings) { page = Page.MAIN; vm.refreshPreviewAsync() }
+        Page.SCRAPE -> ScrapeSettingsScreen(
+            vm.settings, vm.saved, vm::updateSettings,
+            tmdbChecks = vm.tmdbChecks, testing = vm.task == Task.TEST, onTestTmdb = vm::testTmdb,
+        ) { page = Page.MAIN }
     }
 }
 
@@ -112,6 +115,14 @@ enum class ConnState { UNTESTED, OK, FAIL }
 
 enum class Task { SCAN, TEST, MATCH, ORGANIZE, SCRAPE, UNDO }
 
+/** 撤销前给用户看的汇总 */
+data class UndoSummary(
+    val time: Long,
+    val moved: Int,
+    val created: Int,                        // 新写入的 NFO / 图片
+    val samples: List<Pair<String, String>>, // 现在位置 -> 还原到
+)
+
 /** 「开始整理」前给用户看的汇总 */
 data class OrganizeSummary(
     val total: Int, val moves: Int, val renames: Int, val unchanged: Int,
@@ -145,6 +156,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var connChecks by mutableStateOf<List<ConnCheck>>(emptyList())
         private set
+    var tmdbChecks by mutableStateOf<List<ConnCheck>>(emptyList())
+        private set
+    /** 设置是否已写盘（改动后有 300ms 防抖） */
+    var saved by mutableStateOf(true)
+        private set
 
     // 列表筛选与多选
     var filter by mutableStateOf<RowCategory?>(null)     // null = 全部
@@ -164,7 +180,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             settings = runCatching { repo.load() }.getOrDefault(AppSettings())
             lastOps = opLog.load()               // 上次没撤销的批次，重启后仍可撤销
             canUndo = lastOps.isNotEmpty()
-            if (canUndo) status = "上次整理了 ${lastOps.count { it.type == FileOperation.Type.MOVE }} 个文件，可在菜单里撤销"
+            if (canUndo) status = "上次整理了 ${undoSummary()?.moved ?: 0} 个文件，可在右上角菜单里撤销"
             loaded = true
         }
     }
@@ -179,11 +195,15 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             connState = ConnState.UNTESTED
             connMessage = ""
         }
+        if (new.tmdbToken != old.tmdbToken || new.tmdbApiBase != old.tmdbApiBase || new.tmdbImageBase != old.tmdbImageBase)
+            tmdbChecks = emptyList()
         settings = new
+        saved = false
         saveJob?.cancel()
         saveJob = viewModelScope.launch {
             delay(300)
             repo.save(new)
+            saved = true
         }
     }
 
@@ -418,6 +438,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
     }
 
+    fun undoSummary(): UndoSummary? {
+        val ops = lastOps.takeIf { it.isNotEmpty() } ?: return null
+        val moves = ops.filter { it.type == FileOperation.Type.MOVE || it.type == FileOperation.Type.RENAME }
+        return UndoSummary(
+            time = ops.maxOf { it.timestamp },
+            moved = moves.size,
+            created = ops.count { it.type == FileOperation.Type.UPLOAD },
+            samples = moves.take(5).map { it.toPath to it.fromPath },
+        )
+    }
+
     fun undo() = launchTask(Task.UNDO) {
         val ops = lastOps
         if (ops.isEmpty()) return@launchTask
@@ -480,6 +511,40 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (s0.tvRoot.trim().trimEnd('/') != s0.movieRoot.trim().trimEnd('/'))
             add(checkDir(s, "剧集库", s0.tvRoot, library = true))
         finish()
+    }
+
+    /** 检查 TMDB 令牌、API 地址和图片地址（填了反代时尤其有用） */
+    fun testTmdb() = launchTask(Task.TEST) {
+        val checks = mutableListOf<ConnCheck>()
+        fun add(c: ConnCheck) { checks += c; tmdbChecks = checks.toList() }
+        tmdbChecks = emptyList()
+        if (settings.tmdbToken.isBlank()) {
+            add(ConnCheck("API", ConnCheck.Level.FAIL, "未填写令牌"))
+            return@launchTask
+        }
+        val t = newTmdb()
+        val t0 = SystemClock.elapsedRealtime()
+        val results = try {
+            t.searchMovie("Inception")
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            add(ConnCheck("API", ConnCheck.Level.FAIL, connErrorText(e)))
+            return@launchTask
+        }
+        add(ConnCheck("API", ConnCheck.Level.OK, "令牌有效（${SystemClock.elapsedRealtime() - t0} ms）"))
+
+        val poster = results.firstNotNullOfOrNull { it.posterPath }
+        if (poster == null) {
+            add(ConnCheck("图片", ConnCheck.Level.WARN, "没拿到测试图片，无法检查图片地址"))
+            return@launchTask
+        }
+        try {
+            val bytes = TmdbScrapeSource(t).download(t.imageUrl(poster, "w92")!!)
+            add(ConnCheck("图片", ConnCheck.Level.OK, "图片地址可用（${bytes.size / 1024} KB 测试图）"))
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            add(ConnCheck("图片", ConnCheck.Level.FAIL, "图片下载失败：${connErrorText(e)}"))
+        }
     }
 
     private suspend fun checkDir(s: WebDavStorage, label: String, dir: String, library: Boolean): ConnCheck {

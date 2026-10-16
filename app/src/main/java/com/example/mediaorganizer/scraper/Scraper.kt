@@ -20,7 +20,12 @@ import java.util.Locale
 /** 刮削模板，可多选（截图里的三种） */
 enum class ScrapeTemplate { INFUSE, KODI_EMBY, PLEX }
 
-enum class ScrapeStrategy { OVERWRITE, ONLY_MISSING }   // 用 filmix 重新刮削 / 仅刮削缺少文件
+/** 目标位置已有同名 NFO / 图片时怎么处理 */
+enum class ScrapeStrategy {
+    OVERWRITE,      // 全部重新生成
+    UPDATE_NFO,     // 重写 NFO，已有图片保留（用户自己换过的海报不会被冲掉）
+    ONLY_MISSING,   // 只补缺少的文件
+}
 
 enum class ImageQuality(val poster: String, val backdrop: String) {
     ORIGINAL("original", "original"),
@@ -102,7 +107,12 @@ class Scraper(
         for ((i, entry) in outputs.entries.withIndex()) {
             val (path, content) = entry
             val alreadyThere = existing[parentPath(path)]?.contains(path.substringAfterLast('/')) == true
-            if (alreadyThere && config.strategy == ScrapeStrategy.ONLY_MISSING) {
+            val keep = when (config.strategy) {
+                ScrapeStrategy.OVERWRITE -> false
+                ScrapeStrategy.UPDATE_NFO -> content is Content.Image
+                ScrapeStrategy.ONLY_MISSING -> true
+            }
+            if (alreadyThere && keep) {
                 skipped++
             } else {
                 runCatching {
