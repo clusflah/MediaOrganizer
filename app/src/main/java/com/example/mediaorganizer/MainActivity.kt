@@ -431,7 +431,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         )
     }
 
-    fun execute() = launchTask(Task.ORGANIZE) { runOrganize(organizable(), appendUndo = false) }
+    fun execute() = launchTask(Task.ORGANIZE) { runOrganize(organizable(), single = false) }
 
     /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
     fun organizeOne(key: String) = launchTask(Task.ORGANIZE) { organizeSingle(key) }
@@ -442,10 +442,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         rows[i] = rows[i].copy(confirmed = true, excluded = false, outcome = null, plan = null)
         refreshPreview()
         // 并入上一批的撤销记录，不覆盖之前的批量整理
-        runOrganize(listOf(IndexedValue(i, rows[i])).filter { it.value.plan != null }, appendUndo = true)
+        runOrganize(listOf(IndexedValue(i, rows[i])).filter { it.value.plan != null }, single = true)
     }
 
-    private suspend fun runOrganize(indexed: List<IndexedValue<MediaRow>>, appendUndo: Boolean) {
+    /** single：详情里手动整理一个文件——撤销记录并入上一批，刮削一律全部重新生成 */
+    private suspend fun runOrganize(indexed: List<IndexedValue<MediaRow>>, single: Boolean) {
         val s = storage ?: return
         if (indexed.isEmpty()) return
         val report = RenameExecutor(s, storageId).execute(indexed.map { it.value.plan!! }) { done, total, _ ->
@@ -455,7 +456,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         indexed.zip(report.outcomes).forEach { (iv, o) ->
             rows[iv.index] = rows[iv.index].copy(outcome = if (o.skipped) "无需改动" else o.error ?: "ok")
         }
-        rememberOps(report.operations, append = appendUndo)
+        rememberOps(report.operations, append = single)
         status = if (indexed.size == 1) {
             val o = report.outcomes.single()
             when {
@@ -474,7 +475,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         if (settings.autoScrape) {
             task = Task.SCRAPE
-            runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；")
+            runScrape(s, report.outcomes.filter { it.error == null }.map { it.plan }, prefix = "$status；", overwrite = single)
         }
     }
 
@@ -522,7 +523,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun scrapeOne(key: String) = launchTask(Task.SCRAPE) {
         val s = storage ?: return@launchTask
         val plan = rows.firstOrNull { it.key == key && it.category == RowCategory.DONE }?.plan ?: return@launchTask
-        runScrape(s, listOf(plan))
+        runScrape(s, listOf(plan), overwrite = true)        // 手动刮削单项：全部重新生成
     }
 
     fun scrapeOnly() = launchTask(Task.SCRAPE) {
@@ -532,11 +533,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         runScrape(s, plans)
     }
 
-    private suspend fun runScrape(s: WebDavStorage, plans: List<RenamePlan>, prefix: String = "") {
+    private suspend fun runScrape(s: WebDavStorage, plans: List<RenamePlan>, prefix: String = "", overwrite: Boolean = false) {
+        val config = if (overwrite) settings.scrape.copy(strategy = ScrapeStrategy.OVERWRITE) else settings.scrape
         val d = details ?: return
         val t = tmdb ?: return
         progress = null
-        val report = Scraper(s, d, TmdbScrapeSource(t), storageId).scrape(plans, settings.scrape) { done, total ->
+        val report = Scraper(s, d, TmdbScrapeSource(t), storageId).scrape(plans, config) { done, total ->
             progress = done to total
             status = "${prefix}刮削中 $done/$total"
         }

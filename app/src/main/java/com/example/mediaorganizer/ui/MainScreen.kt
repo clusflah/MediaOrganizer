@@ -816,7 +816,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     else row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
                     Text(
-                        "单独整理会并入「撤销上次整理」的记录",
+                        "单项整理会并入「撤销上次整理」的记录；单项刮削一律全部重新生成 NFO 和图片",
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(top = 4.dp),
                     )
