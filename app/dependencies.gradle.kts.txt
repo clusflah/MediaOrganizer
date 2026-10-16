@@ -1,0 +1,23 @@
+// 把下面内容合并进 app/build.gradle.kts 的 dependencies { } 里
+// （用 Android Studio「Empty Activity」模板新建的项目已自带 Compose 相关依赖，重复的可以跳过）
+
+dependencies {
+    // Compose
+    implementation(platform("androidx.compose:compose-bom:2024.09.00"))
+    implementation("androidx.compose.material3:material3")
+    implementation("androidx.compose.material:material-icons-core")
+    implementation("androidx.activity:activity-compose:1.9.2")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.6")
+
+    // 网络 / 协程
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+
+    // 设置保存
+    implementation("androidx.datastore:datastore-preferences:1.1.1")
+}
+
+// android { } 里确认：
+//   namespace = "com.example.mediaorganizer"
+//   defaultConfig { minSdk = 26 }        // Keystore AES-GCM、java.time 等需要 23+，建议 26
+//   buildFeatures { compose = true }
