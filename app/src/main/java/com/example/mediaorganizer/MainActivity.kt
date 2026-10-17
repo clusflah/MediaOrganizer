@@ -752,8 +752,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 目标已存在：对比和处理 ----------
 
-    /** 目标文件夹里的情况：和本文件同名的那个，以及文件夹里所有视频 */
-    data class TargetInfo(val dir: String, val existing: RemoteFile?, val videos: List<RemoteFile>, val dirMissing: Boolean)
+    /** 目标文件夹里的情况：和本文件同名的那个、文件夹里所有视频，以及其中和本文件是同一部/同一集的 */
+    data class TargetInfo(
+        val dir: String, val existing: RemoteFile?, val videos: List<RemoteFile>, val dirMissing: Boolean,
+        val related: List<RemoteFile> = videos,
+    )
 
     /** 不占用 busy，详情弹窗打开时直接查 */
     suspend fun inspectTarget(key: String): TargetInfo? {
@@ -767,7 +770,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (e.code == 404) return TargetInfo(dir, null, emptyList(), dirMissing = true) else throw e
         }
         val videos = list.filter { !it.isDirectory && it.name.substringAfterLast('.', "").lowercase() in MediaNameParser.VIDEO_EXTENSIONS }
-        return TargetInfo(dir, list.firstOrNull { !it.isDirectory && it.name == plan.targetName }, videos, dirMissing = false)
+        return TargetInfo(
+            dir, list.firstOrNull { !it.isDirectory && it.name == plan.targetName }, videos, dirMissing = false,
+            related = Precheck.sameItem(videos, plan.input),
+        )
     }
 
     /** 删除影视库里的某个文件（对比后决定不要的旧版本） */

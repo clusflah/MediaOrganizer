@@ -73,4 +73,21 @@ class PrecheckTest {
         assertEquals("a (2).mkv", Precheck.uniqueName("a.mkv", setOf("a.mkv")))
         assertEquals("a (3).mkv", Precheck.uniqueName("a.mkv", setOf("a.mkv", "a (2).mkv")))
     }
+
+    @Test fun sameItemOnlyKeepsSameEpisodeForTv() {
+        fun f(n: String) = RemoteFile("/lib/$n", n, false, 1L)
+        val videos = listOf(
+            f("少年法庭 (2022) S01E01.mkv"), f("少年法庭 (2022) S01E02.mkv"),
+            f("少年法庭 (2022) S01E02 (2).mkv"), f("少年法庭 (2022) S01E03.mkv"), f("少年法庭 (2022) S02E02.mkv"),
+        )
+        val ep = NamingInput(
+            isEpisode = true, chineseTitle = "少年法庭", englishTitle = null, year = 2022, season = 1, episode = 2, tmdbId = 1,
+            extension = "mkv", originalFileName = "x.mkv",
+        )
+        assertEquals(
+            listOf("少年法庭 (2022) S01E02.mkv", "少年法庭 (2022) S01E02 (2).mkv"),
+            Precheck.sameItem(videos, ep).map { it.name },
+        )
+        assertEquals(videos, Precheck.sameItem(videos, ep.copy(isEpisode = false)))   // 电影：整个文件夹
+    }
 }

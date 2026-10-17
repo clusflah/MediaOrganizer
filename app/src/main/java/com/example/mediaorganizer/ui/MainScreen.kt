@@ -1159,7 +1159,7 @@ private fun InfoLine(label: String, value: String, color: Color = Color.Unspecif
     }
 }
 
-/** 「目标已存在」时：并排对比两个文件，列出目标文件夹里的所有视频，直接删除或决定怎么整理 */
+/** 「目标已存在」时：并排对比两个文件，列出目标位置同一部（剧集：同一集）的其他版本，直接删除或决定怎么整理 */
 @Composable
 private fun TargetComparePanel(vm: MainViewModel, row: MediaRow, onClose: () -> Unit) {
     var reload by remember { mutableIntStateOf(0) }
@@ -1192,16 +1192,23 @@ private fun TargetComparePanel(vm: MainViewModel, row: MediaRow, onClose: () -> 
                     if (i.dirMissing) "目标文件夹已不存在，现在可以直接整理" else "目标位置已经没有同名文件了，现在可以直接整理",
                     color = Green, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp),
                 )
-                else -> CompareLine(
-                    "已有", i.existing.name,
-                    listOf(sizeText(i.existing.size), if (i.existing.modified > 0) "修改于 " + formatTime(i.existing.modified) else "")
-                        .filter { it.isNotEmpty() }.joinToString(" · "),
-                )
+                else -> {
+                    CompareLine(
+                        "已有", i.existing.name,
+                        listOf(sizeText(i.existing.size), if (i.existing.modified > 0) "修改于 " + formatTime(i.existing.modified) else "")
+                            .filter { it.isNotEmpty() }.joinToString(" · "),
+                    )
+                    if (src.size > 0 && src.size == i.existing.size) Text(
+                        "两个文件大小完全相同，很可能是重复的同一个文件",
+                        color = Orange, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
             }
-            // 目标文件夹里的其他视频（可能是同一部的别的版本）
-            val others = i?.videos.orEmpty().filter { it.name != i?.existing?.name }
+            // 目标文件夹里同一部（剧集：同一集）的其他版本；剧集的其他集不冲突，不列出来
+            val others = i?.related.orEmpty().filter { it.name != i?.existing?.name }
             if (others.isNotEmpty()) {
-                Text("这个文件夹里还有：", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                Text(if (row.plan?.input?.isEpisode == true) "这一集还有其他版本：" else "这个文件夹里还有：",
+                    style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
                 others.forEach { v ->
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(Modifier.weight(1f)) {
