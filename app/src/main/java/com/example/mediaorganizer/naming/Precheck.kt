@@ -1,5 +1,6 @@
 package com.example.mediaorganizer.naming
 
+import com.example.mediaorganizer.parser.MediaNameParser
 import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.storage.StorageException
 import com.example.mediaorganizer.storage.StorageProvider
@@ -108,6 +109,18 @@ class Precheck(private val storage: StorageProvider) {
             var n = 2
             while ("$base ($n)$ext" in taken) n++
             return "$base ($n)$ext"
+        }
+
+        /**
+         * 目标文件夹里和这个文件「是同一个东西」的视频：电影是整个文件夹，
+         * 剧集只算同一季同一集的（别的集不冲突，不该拿来对比）
+         */
+        fun sameItem(videos: List<RemoteFile>, input: NamingInput): List<RemoteFile> {
+            if (!input.isEpisode) return videos
+            return videos.filter { v ->
+                val p = MediaNameParser.parse(v.name)
+                p.episode == input.episode && (p.season ?: 1) == (input.season ?: 1)
+            }
         }
     }
 }
