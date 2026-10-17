@@ -122,5 +122,19 @@ class Precheck(private val storage: StorageProvider) {
                 p.episode == input.episode && (p.season ?: 1) == (input.season ?: 1)
             }
         }
+
+        /**
+         * 同一部剧里别的集的重复版本（同一季同一集有多个文件），按季、集排序；
+         * 本文件这一集不算在内（上面单独对比）
+         */
+        fun duplicateEpisodes(videos: List<RemoteFile>, input: NamingInput): List<List<RemoteFile>> {
+            if (!input.isEpisode) return emptyList()
+            val self = (input.season ?: 1) to input.episode
+            return videos.distinctBy { it.path }
+                .groupBy { v -> MediaNameParser.parse(v.name).let { (it.season ?: 1) to it.episode } }
+                .filter { (k, files) -> k.second != null && k != self && files.size > 1 }
+                .toSortedMap(compareBy<Pair<Int, Int?>>({ it.first }, { it.second }))
+                .values.map { files -> files.sortedBy { it.name } }
+        }
     }
 }

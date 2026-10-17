@@ -90,4 +90,24 @@ class PrecheckTest {
         )
         assertEquals(videos, Precheck.sameItem(videos, ep.copy(isEpisode = false)))   // 电影：整个文件夹
     }
+
+    @Test fun duplicateEpisodesGroupsOtherEpisodesOnly() {
+        fun f(n: String, dir: String = "/lib/Season 01") = RemoteFile("$dir/$n", n, false, 1L)
+        val videos = listOf(
+            f("剧 S01E01.mkv"),
+            f("剧 S01E02.mkv"), f("剧 S01E02 (2).mkv"),                          // 本文件这一集，不算
+            f("剧 S01E05.mkv"), f("Show.S01E05.1080p.mkv"),
+            f("剧 S01E03.mkv"),
+            f("剧 S02E01.mkv", "/lib/Season 02"), f("剧 S02E01 (2).mkv", "/lib/Season 02"),
+        )
+        val ep = NamingInput(
+            isEpisode = true, chineseTitle = "剧", englishTitle = null, year = 2022, season = 1, episode = 2, tmdbId = 1,
+            extension = "mkv", originalFileName = "x.mkv",
+        )
+        assertEquals(
+            listOf(listOf("Show.S01E05.1080p.mkv", "剧 S01E05.mkv"), listOf("剧 S02E01 (2).mkv", "剧 S02E01.mkv")),
+            Precheck.duplicateEpisodes(videos + videos.take(1), ep).map { g -> g.map { it.name } },   // 重复列出的同一路径只算一次
+        )
+        assertTrue(Precheck.duplicateEpisodes(videos, ep.copy(isEpisode = false)).isEmpty())
+    }
 }
