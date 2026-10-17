@@ -37,10 +37,11 @@ import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.storage.CleanupMode
 import com.example.mediaorganizer.storage.CleanupTarget
+import com.example.mediaorganizer.storage.StorageFactory
+import com.example.mediaorganizer.storage.StorageType
 import com.example.mediaorganizer.storage.normalizePath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
-import java.net.URI
 
 private val Green = Color(0xFF2E7D32)
 private val Orange = Color(0xFFEF6C00)
@@ -51,7 +52,7 @@ private val Gray = Color(0xFF757575)
 @Composable
 fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
     val s = vm.settings
-    var editConn by rememberSaveable { mutableStateOf(s.webdavUrl.isBlank() || s.tmdbToken.isBlank()) }
+    var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.tmdbToken.isBlank()) }
     var detailKey by remember { mutableStateOf<String?>(null) }
     var askOrganize by remember { mutableStateOf(false) }
     var askUndo by remember { mutableStateOf(false) }
@@ -195,7 +196,7 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
                         color = MaterialTheme.colorScheme.outline)
                 }
             },
-            enabled = !vm.busy && vm.settings.webdavUrl.isNotBlank(),
+            enabled = !vm.busy && StorageFactory.missing(vm.settings) == null,
             onClick = { go(vm::findLeftovers) },
         )
         HorizontalDivider()
@@ -225,17 +226,14 @@ private fun SelectionBar(vm: MainViewModel, visibleKeys: List<String>) {
 
 // ============================ 媒体服务器卡片 ============================
 
-private fun hostOf(url: String): String =
-    runCatching { URI(url.trim()).let { u -> u.host + if (u.port > 0) ":${u.port}" else "" } }
-        .getOrNull()?.takeIf { !it.startsWith("null") } ?: url.trim()
-
 @Composable
 private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () -> Unit, openScrape: () -> Unit) {
     val s = vm.settings
     fun up(n: AppSettings) = vm.updateSettings(n)
-    val host = hostOf(s.webdavUrl)
+    val host = s.storageType.label + " · " + StorageFactory.describe(s)
+    val configured = StorageFactory.missing(s) == null
     val (dot, title) = when {
-        s.webdavUrl.isBlank() -> Gray to "尚未配置媒体服务器"
+        !configured -> Gray to "尚未配置媒体库"
         vm.connState == ConnState.OK -> Green to "已连接 · $host"
         vm.connState == ConnState.FAIL -> Red to "连接失败 · $host"
         else -> Gray to "尚未测试 · $host"
@@ -247,7 +245,7 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
                 Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
                 Spacer(Modifier.width(10.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("媒体服务器", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                    Text("媒体库", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
                     Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "编辑") }
@@ -269,14 +267,17 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
             }
             if (expanded) {
                 Spacer(Modifier.height(8.dp))
-                SettingField("WebDAV 地址", s.webdavUrl) { up(s.copy(webdavUrl = it)) }
-                SettingField("用户名", s.username) { up(s.copy(username = it)) }
-                SettingField("密码", s.password, password = true) { up(s.copy(password = it)) }
+                StorageFields(s, ::up)
+                Text(
+                    "下面的目录都是这个媒体库里的路径" + if (s.storageType == StorageType.LOCAL) "（相对所选文件夹，/ 就是它本身）" else "",
+                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                    modifier = Modifier.padding(top = 8.dp),
+                )
                 SettingField("扫描目录", s.scanDir) { up(s.copy(scanDir = it)) }
                 SettingField("电影库目录", s.movieRoot) { up(s.copy(movieRoot = it)) }
                 SettingField("剧集库目录", s.tvRoot) { up(s.copy(tvRoot = it)) }
                 Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = vm::testConnection, enabled = !vm.busy && s.webdavUrl.isNotBlank()) {
+                    OutlinedButton(onClick = vm::testConnection, enabled = !vm.busy && configured) {
                         if (vm.task == Task.TEST) {
                             CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
                             Spacer(Modifier.width(8.dp))
@@ -289,6 +290,62 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
                 vm.connChecks.forEach { ConnCheckRow(it) }
             }
         }
+    }
+}
+
+/** 媒体库类型选择 + 该类型的连接参数 */
+@OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
+@Composable
+private fun StorageFields(s: AppSettings, up: (AppSettings) -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val pickTree = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
+    ) { uri ->
+        if (uri != null) {
+            // 持久授权，App 重启后仍可访问
+            runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION or android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION,
+                )
+            }
+            up(s.copy(localTreeUri = uri.toString()))
+        }
+    }
+
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        StorageType.entries.filter { it.ready }.forEach { t ->
+            FilterChip(selected = s.storageType == t, onClick = { up(s.copy(storageType = t)) }, label = { Text(t.label) })
+        }
+    }
+    when (s.storageType) {
+        StorageType.WEBDAV -> {
+            SettingField("WebDAV 地址", s.webdavUrl) { up(s.copy(webdavUrl = it)) }
+            SettingField("用户名", s.username) { up(s.copy(username = it)) }
+            SettingField("密码", s.password, password = true) { up(s.copy(password = it)) }
+            Text("Alist / OpenList / CloudDrive2 挂载的网盘也可以用 WebDAV 连接",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+        StorageType.SMB -> {
+            SettingField("主机（IP 或名称，可带端口）", s.smbHost) { up(s.copy(smbHost = it)) }
+            SettingField("共享名（如 video）", s.smbShare) { up(s.copy(smbShare = it)) }
+            SettingField("用户名（留空为访客）", s.smbUser) { up(s.copy(smbUser = it)) }
+            SettingField("密码", s.smbPassword, password = true) { up(s.copy(smbPassword = it)) }
+            SettingField("域（一般留空）", s.smbDomain) { up(s.copy(smbDomain = it)) }
+        }
+        StorageType.LOCAL -> {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                Text(
+                    if (s.localTreeUri.isBlank()) "未选择" else StorageFactory.describe(s),
+                    style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f),
+                    maxLines = 2, overflow = TextOverflow.Ellipsis,
+                )
+                OutlinedButton(onClick = { pickTree.launch(null) }) { Text(if (s.localTreeUri.isBlank()) "选择文件夹" else "重新选择") }
+            }
+            Text("可选手机里的文件夹，或插着的 U 盘 / 移动硬盘。选包含下载和影视库的上层文件夹。",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+        else -> {}
     }
 }
 

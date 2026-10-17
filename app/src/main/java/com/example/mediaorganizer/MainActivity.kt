@@ -31,7 +31,9 @@ import com.example.mediaorganizer.storage.SourceCleaner
 import com.example.mediaorganizer.storage.OperationLog
 import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.storage.StorageException
-import com.example.mediaorganizer.storage.WebDavStorage
+import com.example.mediaorganizer.storage.StorageFactory
+import com.example.mediaorganizer.storage.StorageProvider
+import com.example.mediaorganizer.storage.StorageType
 import com.example.mediaorganizer.storage.normalizePath
 import com.example.mediaorganizer.storage.parentPath
 import com.example.mediaorganizer.ui.MainScreen
@@ -180,7 +182,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var selected by mutableStateOf<Set<String>>(emptySet())
         private set
 
-    private var storage: WebDavStorage? = null
+    private var storage: StorageProvider? = null
     private var tmdb: TmdbClient? = null
     private var details: TmdbDetails? = null
     private var lastOps: List<FileOperation> = emptyList()
@@ -200,15 +202,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 每次修改立即生效，300ms 防抖后写入 DataStore（输入框打字不会频繁写盘） */
     fun updateSettings(new: AppSettings) {
         val old = settings
-        if (new.webdavUrl != old.webdavUrl || new.username != old.username || new.password != old.password ||
-            new.scanDir != old.scanDir || new.movieRoot != old.movieRoot || new.tvRoot != old.tvRoot
-        ) {                                  // 连接信息改了，旧的测试结果作废
+        if (StorageFactory.connectionKey(new) != StorageFactory.connectionKey(old)) {   // 连接信息改了，旧的测试结果作废
             connChecks = emptyList()
             connState = ConnState.UNTESTED
             connMessage = ""
         }
         if (new.tmdbToken != old.tmdbToken || new.tmdbApiBase != old.tmdbApiBase || new.tmdbImageBase != old.tmdbImageBase)
             tmdbChecks = emptyList()
+        if (new.storageType != old.storageType || StorageFactory.id(new) != StorageFactory.id(old)) {
+            storage?.let { old -> viewModelScope.launch { runCatching { old.close() } } }
+            storage = null                   // 换了媒体库，下次操作重新连接
+        }
         settings = new
         saved = false
         saveJob?.cancel()
@@ -219,11 +223,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private val storageId get() = "webdav:" + settings.webdavUrl.trim().trimEnd('/')
+    private val storageId get() = StorageFactory.id(settings)
 
-    private fun newStorage() = settings.let {
-        WebDavStorage(it.webdavUrl.trim(), it.username.ifBlank { null }, it.password.ifBlank { null })
-    }
+    private fun newStorage(): StorageProvider = StorageFactory.create(getApplication(), settings)
 
     private fun newTmdb() = settings.let {
         TmdbClient(it.tmdbToken.trim(), apiBase = it.tmdbApiBase.trimEnd('/'), imageBase = it.tmdbImageBase.trimEnd('/'))
@@ -482,13 +484,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- 清理原文件夹 ----------
 
     /** 不能删的：扫描目录、两个库目录，以及所有已知的目标目录（含上级） */
-    private fun cleaner(s: WebDavStorage, mode: CleanupMode): SourceCleaner {
+    private fun cleaner(s: StorageProvider, mode: CleanupMode): SourceCleaner {
         val st = settings
         val targets = rows.mapNotNull { it.plan }.flatMap { listOf(it.targetDir, it.showDir) }
         return SourceCleaner(s, mode, st.scanDir, listOf(st.movieRoot, st.tvRoot) + targets)
     }
 
-    private suspend fun cleanSources(s: WebDavStorage, moved: List<RenamePlan>): CleanupReport? {
+    private suspend fun cleanSources(s: StorageProvider, moved: List<RenamePlan>): CleanupReport? {
         val mode = settings.cleanupMode
         if (mode == CleanupMode.OFF || moved.isEmpty()) return null
         status += "；清理原文件夹…"
@@ -533,7 +535,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         runScrape(s, plans)
     }
 
-    private suspend fun runScrape(s: WebDavStorage, plans: List<RenamePlan>, prefix: String = "", overwrite: Boolean = false) {
+    private suspend fun runScrape(s: StorageProvider, plans: List<RenamePlan>, prefix: String = "", overwrite: Boolean = false) {
         val config = if (overwrite) settings.scrape.copy(strategy = ScrapeStrategy.OVERWRITE) else settings.scrape
         val d = details ?: return
         val t = tmdb ?: return
@@ -600,7 +602,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         status = "测试连接中…"
 
         val s = try { newStorage() } catch (e: IllegalArgumentException) {
-            add(ConnCheck("服务器", ConnCheck.Level.FAIL, "地址格式不对，应类似 http://192.168.1.10:5005"))
+            add(ConnCheck("服务器", ConnCheck.Level.FAIL, badConfigText(e)))
             finish()
             return@launchTask
         }
@@ -656,9 +658,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private suspend fun checkDir(s: WebDavStorage, label: String, dir: String, library: Boolean): ConnCheck {
+    private suspend fun checkDir(s: StorageProvider, label: String, dir: String, library: Boolean): ConnCheck {
         if (dir.isBlank()) return ConnCheck(label, ConnCheck.Level.WARN, "未填写")
-        val path = WebDavStorage.normalize(dir)
+        val path = normalizePath(dir)
         return try {
             val info = s.statDir(path)
             when {
@@ -675,7 +677,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 写一个空的临时文件再删掉，确认有写权限 */
-    private suspend fun checkWritable(s: WebDavStorage, label: String, dir: String): ConnCheck {
+    private suspend fun checkWritable(s: StorageProvider, label: String, dir: String): ConnCheck {
         val probe = RemoteFile(
             path = dir.trimEnd('/') + "/.mediaorganizer-test-${System.currentTimeMillis()}",
             name = "", isDirectory = false,
@@ -696,6 +698,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** 设置没填够时用工厂给的提示；WebDAV 地址解析失败时 OkHttp 的英文报错换成中文 */
+    private fun badConfigText(e: IllegalArgumentException): String =
+        StorageFactory.missing(settings)
+            ?: if (settings.storageType == StorageType.WEBDAV) "地址格式不对，应类似 http://192.168.1.10:5005"
+            else e.message ?: "设置有误"
+
     private fun connErrorText(e: Exception): String = when (e) {
         is StorageException -> when (e.code) {
             401 -> "用户名或密码错误"
@@ -704,7 +712,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             405 -> "该地址不是 WebDAV 服务（HTTP 405），检查端口和路径"
             else -> e.message ?: "HTTP ${e.code}"
         }
-        is IllegalArgumentException -> "地址格式不对，应类似 http://192.168.1.10:5005"
+        is IllegalArgumentException -> badConfigText(e)
         is UnknownHostException -> "找不到主机，检查地址"
         is ConnectException -> "连不上服务器，检查 IP、端口，以及 WebDAV 服务是否开启"
         is SocketTimeoutException -> "连接超时，检查网络或是否在同一局域网"

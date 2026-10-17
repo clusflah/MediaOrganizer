@@ -133,7 +133,7 @@ class WebDavStorage(
     }
 
     /** 读取单个文件夹的信息，不存在返回 null（连接测试用） */
-    suspend fun statDir(path: String): RemoteFile? =
+    override suspend fun statDir(path: String): RemoteFile? =
         propfind(normalize(path), depth = 0, dir = true) { resp ->
             if (resp.code == 404) return@propfind null
             resp.ensure("读取失败：$path")

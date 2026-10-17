@@ -4,13 +4,30 @@ import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeTemplate
 import com.example.mediaorganizer.storage.CleanupMode
+import com.example.mediaorganizer.storage.StorageType
 
 /** 应用全部设置 */
 data class AppSettings(
-    // 连接
+    // 连接：当前用哪种媒体库，各类型的参数分开保存，切换类型不会丢
+    val storageType: StorageType = StorageType.WEBDAV,
+    // WebDAV
     val webdavUrl: String = "http://192.168.1.10:5005",
     val username: String = "",
     val password: String = "",
+    // SMB
+    val smbHost: String = "",
+    val smbShare: String = "",
+    val smbUser: String = "",
+    val smbPassword: String = "",
+    val smbDomain: String = "",
+    // 本机 / U 盘（SAF 文档树 URI）
+    val localTreeUri: String = "",
+    // 115（扫码登录拿到的 cookie）
+    val pan115Cookie: String = "",
+    // 阿里云盘开放平台
+    val aliClientId: String = "",
+    val aliClientSecret: String = "",
+    val aliRefreshToken: String = "",
     // TMDB
     val tmdbToken: String = "",
     val tmdbApiBase: String = "https://api.themoviedb.org/3",
@@ -38,9 +55,20 @@ data class AppSettings(
 object SettingsCodec {
 
     fun encode(s: AppSettings): Map<String, String> = buildMap {
+        put("storageType", s.storageType.name)
         put("webdavUrl", s.webdavUrl)
         put("username", s.username)
         put("password", s.password)
+        put("smbHost", s.smbHost)
+        put("smbShare", s.smbShare)
+        put("smbUser", s.smbUser)
+        put("smbPassword", s.smbPassword)
+        put("smbDomain", s.smbDomain)
+        put("localTreeUri", s.localTreeUri)
+        put("pan115Cookie", s.pan115Cookie)
+        put("aliClientId", s.aliClientId)
+        put("aliClientSecret", s.aliClientSecret)
+        put("aliRefreshToken", s.aliRefreshToken)
         put("tmdbToken", s.tmdbToken)
         put("tmdbApiBase", s.tmdbApiBase)
         put("tmdbImageBase", s.tmdbImageBase)
@@ -59,9 +87,20 @@ object SettingsCodec {
         val d = AppSettings()
         val r = Reader(m, "")
         return AppSettings(
+            storageType = r.enum("storageType", d.storageType),
             webdavUrl = r.str("webdavUrl", d.webdavUrl),
             username = r.str("username", d.username),
             password = r.str("password", d.password),
+            smbHost = r.str("smbHost", d.smbHost),
+            smbShare = r.str("smbShare", d.smbShare),
+            smbUser = r.str("smbUser", d.smbUser),
+            smbPassword = r.str("smbPassword", d.smbPassword),
+            smbDomain = r.str("smbDomain", d.smbDomain),
+            localTreeUri = r.str("localTreeUri", d.localTreeUri),
+            pan115Cookie = r.str("pan115Cookie", d.pan115Cookie),
+            aliClientId = r.str("aliClientId", d.aliClientId),
+            aliClientSecret = r.str("aliClientSecret", d.aliClientSecret),
+            aliRefreshToken = r.str("aliRefreshToken", d.aliRefreshToken),
             tmdbToken = r.str("tmdbToken", d.tmdbToken),
             tmdbApiBase = r.str("tmdbApiBase", d.tmdbApiBase),
             tmdbImageBase = r.str("tmdbImageBase", d.tmdbImageBase),

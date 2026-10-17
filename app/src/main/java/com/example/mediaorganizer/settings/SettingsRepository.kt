@@ -23,7 +23,9 @@ class SettingsRepository(context: Context) {
     private val store = context.applicationContext.settingsStore
 
     /** 这些字段加密后再存 */
-    private val secretKeys = setOf("password", "tmdbToken")
+    private val secretKeys = setOf(
+        "password", "tmdbToken", "smbPassword", "pan115Cookie", "aliClientSecret", "aliRefreshToken",
+    )
 
     suspend fun load(): AppSettings = withContext(Dispatchers.IO) {
         val (map, hasPlaintext) = readMap(store.data.first().asMap())

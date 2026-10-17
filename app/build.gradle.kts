@@ -18,8 +18,8 @@ android {
         applicationId = "com.example.mediaorganizer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 10
-        versionName = "1.9"
+        versionCode = 11
+        versionName = "2.0"
     }
 
     signingConfigs {
@@ -67,6 +67,10 @@ dependencies {
 
     // 设置保存
     implementation("androidx.datastore:datastore-preferences:1.1.1")
+
+    // SMB 共享（SMB2/3）；BouncyCastle 提供 NTLM 需要的 MD4
+    implementation("com.hierynomus:smbj:0.13.0")
+    implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
 
     testImplementation("junit:junit:4.13.2")
 }

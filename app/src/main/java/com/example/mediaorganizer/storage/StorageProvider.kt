@@ -40,6 +40,20 @@ interface StorageProvider {
 
     /** 网盘接口有限流，批量操作时上层据此控制节奏 */
     val minRequestIntervalMs: Long get() = 0
+
+    /** 读取单个文件夹的信息，不存在返回 null（连接测试用）；默认从上级目录的列表里找 */
+    suspend fun statDir(path: String): RemoteFile? {
+        val p = normalizePath(path)
+        if (p == "/") return RemoteFile("/", "", isDirectory = true)
+        return try {
+            list(parentPath(p)).firstOrNull { it.name == p.substringAfterLast('/') }
+        } catch (e: StorageException) {
+            if (e.code == 404) null else throw e
+        }
+    }
+
+    /** 不再使用时释放连接（SMB 等长连接） */
+    suspend fun close() {}
 }
 
 fun normalizePath(path: String): String =
