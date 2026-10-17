@@ -1149,6 +1149,104 @@ private fun InfoLine(label: String, value: String, color: Color = Color.Unspecif
     }
 }
 
+/** 「目标已存在」时：并排对比两个文件，列出目标文件夹里的所有视频，直接删除或决定怎么整理 */
+@Composable
+private fun TargetComparePanel(vm: MainViewModel, row: MediaRow, onClose: () -> Unit) {
+    var reload by remember { mutableIntStateOf(0) }
+    var info by remember(row.key) { mutableStateOf<MainViewModel.TargetInfo?>(null) }
+    var error by remember(row.key) { mutableStateOf<String?>(null) }
+    var confirm by remember { mutableStateOf<Pair<String, () -> Unit>?>(null) }
+    LaunchedEffect(row.key, reload) {
+        error = null
+        info = try { vm.inspectTarget(row.key) } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            error = "读取目标文件夹失败：${e.message}"; null
+        }
+    }
+    val cloud = vm.settings.storageType == StorageType.PAN115 || vm.settings.storageType == StorageType.ALIYUN
+    val gone = if (cloud) "（进网盘回收站，可恢复）" else "（直接删除，无法恢复）"
+    val src = row.match.file ?: return
+    val p = row.match.parsed
+
+    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("对比后决定保留哪个", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+            Spacer(Modifier.height(6.dp))
+            CompareLine("本文件", src.name, listOfNotNull(sizeText(src.size), p.resolution, p.source, p.videoCodec).filter { it.isNotEmpty() }.joinToString(" · "))
+            val i = info
+            when {
+                error != null -> Text(error!!, color = Red, style = MaterialTheme.typography.bodySmall)
+                i == null -> LinearProgressIndicator(Modifier.fillMaxWidth().padding(vertical = 8.dp))
+                i.existing == null -> Text(
+                    if (i.dirMissing) "目标文件夹已不存在，现在可以直接整理" else "目标位置已经没有同名文件了，现在可以直接整理",
+                    color = Green, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp),
+                )
+                else -> CompareLine(
+                    "已有", i.existing.name,
+                    listOf(sizeText(i.existing.size), if (i.existing.modified > 0) "修改于 " + formatTime(i.existing.modified) else "")
+                        .filter { it.isNotEmpty() }.joinToString(" · "),
+                )
+            }
+            // 目标文件夹里的其他视频（可能是同一部的别的版本）
+            val others = i?.videos.orEmpty().filter { it.name != i?.existing?.name }
+            if (others.isNotEmpty()) {
+                Text("这个文件夹里还有：", style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                others.forEach { v ->
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Column(Modifier.weight(1f)) {
+                            Text(v.name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(sizeText(v.size), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+                        }
+                        TextButton(onClick = { confirm = "删除 ${v.name}？$gone" to { vm.deleteRemote(v) { reload++ } } }, enabled = !vm.busy) {
+                            Text("删除", color = Red)
+                        }
+                    }
+                }
+            }
+
+            @OptIn(ExperimentalLayoutApi::class)
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                OutlinedButton(onClick = { confirm = "删除本文件 ${src.name}？$gone" to { vm.deleteSource(row.key); onClose() } }, enabled = !vm.busy) {
+                    Text("删除本文件", color = Red)
+                }
+                if (i?.existing != null) {
+                    OutlinedButton(onClick = {
+                        confirm = "删除已有的 ${i.existing.name}，再把本文件整理过去？$gone" to { vm.overwriteAndOrganize(row.key); onClose() }
+                    }, enabled = !vm.busy) { Text("覆盖已有文件") }
+                    OutlinedButton(onClick = {
+                        vm.keepBothAndOrganize(row.key, i.videos.map { it.name }.toSet()); onClose()
+                    }, enabled = !vm.busy) { Text("保留两者") }
+                    if (i.existing.size > 0) TextButton(onClick = {
+                        confirm = "删除已有的 ${i.existing.name}？$gone" to { vm.deleteRemote(i.existing) { reload++ } }
+                    }, enabled = !vm.busy) { Text("只删除已有文件", color = Red) }
+                }
+            }
+        }
+    }
+
+    confirm?.let { (msg, action) ->
+        AlertDialog(
+            onDismissRequest = { confirm = null },
+            title = { Text("确认删除") },
+            text = { Text(msg) },
+            confirmButton = { TextButton(onClick = { confirm = null; action() }) { Text("删除", color = Red) } },
+            dismissButton = { TextButton(onClick = { confirm = null }) { Text("取消") } },
+        )
+    }
+}
+
+@Composable
+private fun CompareLine(label: String, name: String, meta: String) {
+    Row(Modifier.padding(vertical = 3.dp)) {
+        Text(label, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline, modifier = Modifier.width(48.dp))
+        Column {
+            Text(name, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            if (meta.isNotEmpty()) Text(meta, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
 private fun sameMatch(a: TmdbSearchResult?, b: TmdbSearchResult?) =
     a != null && b != null && a.id == b.id && a.type == b.type
 
@@ -1210,6 +1308,10 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                         MaterialTheme.colorScheme.primary)
                     else row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
+                    // 目标已存在 / 本批次重名：直接在这里对比、删除或决定怎么整理
+                    if (row.category == RowCategory.FAILED && !pickChanged &&
+                        (row.outcome.orEmpty().contains("已存在") || row.outcome.orEmpty().contains("重复"))
+                    ) TargetComparePanel(vm, row, onClose = onDismiss)
                     Text(
                         "单项整理会并入「撤销上次整理」的记录；单项刮削一律全部重新生成 NFO 和图片",
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,

@@ -34,6 +34,7 @@ import com.example.mediaorganizer.storage.CleanupReport
 import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.FileOperation
 import com.example.mediaorganizer.storage.NoOpStorage
+import com.example.mediaorganizer.parser.MediaNameParser
 import com.example.mediaorganizer.storage.SourceCleaner
 import com.example.mediaorganizer.storage.OperationLog
 import com.example.mediaorganizer.storage.RemoteFile
@@ -658,11 +659,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
     fun organizeOne(key: String) = launchTask(Task.ORGANIZE) { organizeSingle(key) }
 
-    private suspend fun organizeSingle(key: String) {
+    /** @param targetName 指定新文件名（「保留两者」时用），null 按命名规则 */
+    private suspend fun organizeSingle(key: String, targetName: String? = null) {
         val i = rows.indexOfFirst { it.key == key }
         if (i < 0 || rows[i].chosen == null || rows[i].match.file == null) return
         rows[i] = rows[i].copy(confirmed = true, excluded = false, outcome = null, plan = null)
         refreshPreview()
+        if (targetName != null) rows[i].plan?.let { rows[i] = rows[i].copy(plan = it.copy(targetName = targetName)) }
         // 并入上一批的撤销记录，不覆盖之前的批量整理
         runOrganize(listOf(IndexedValue(i, rows[i])).filter { it.value.plan != null }, single = true)
     }
@@ -741,6 +744,58 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissLeftovers() { leftovers = null }
+
+    // ---------- 目标已存在：对比和处理 ----------
+
+    /** 目标文件夹里的情况：和本文件同名的那个，以及文件夹里所有视频 */
+    data class TargetInfo(val dir: String, val existing: RemoteFile?, val videos: List<RemoteFile>, val dirMissing: Boolean)
+
+    /** 不占用 busy，详情弹窗打开时直接查 */
+    suspend fun inspectTarget(key: String): TargetInfo? {
+        val row = rows.firstOrNull { it.key == key } ?: return null
+        val plan = row.plan ?: return null
+        val s = storage ?: newStorage().also { it.connect(); storage = it }
+        val dir = normalizePath(plan.targetDir)
+        val list = try {
+            s.list(dir)
+        } catch (e: StorageException) {
+            if (e.code == 404) return TargetInfo(dir, null, emptyList(), dirMissing = true) else throw e
+        }
+        val videos = list.filter { !it.isDirectory && it.name.substringAfterLast('.', "").lowercase() in MediaNameParser.VIDEO_EXTENSIONS }
+        return TargetInfo(dir, list.firstOrNull { !it.isDirectory && it.name == plan.targetName }, videos, dirMissing = false)
+    }
+
+    /** 删除影视库里的某个文件（对比后决定不要的旧版本） */
+    fun deleteRemote(file: RemoteFile, onDone: () -> Unit = {}) = launchTask(Task.ORGANIZE) {
+        val s = storage ?: return@launchTask
+        s.delete(file)
+        status = "已删除 ${file.name}"
+        onDone()
+    }
+
+    /** 删除这个源文件（已有的版本更好） */
+    fun deleteSource(key: String) = launchTask(Task.ORGANIZE) {
+        val s = storage ?: return@launchTask
+        val i = rows.indexOfFirst { it.key == key }
+        val file = rows.getOrNull(i)?.match?.file ?: return@launchTask
+        s.delete(file)
+        rows[i] = rows[i].copy(outcome = DELETED_OUTCOME)
+        status = "已删除 ${file.name}"
+    }
+
+    /** 先删掉目标位置的旧文件，再整理这个 */
+    fun overwriteAndOrganize(key: String) = launchTask(Task.ORGANIZE) {
+        val s = storage ?: return@launchTask
+        val plan = rows.firstOrNull { it.key == key }?.plan ?: return@launchTask
+        s.delete(RemoteFile(plan.targetPath, plan.targetName, isDirectory = false))
+        organizeSingle(key)
+    }
+
+    /** 新文件名后加 (2)，和旧文件并存 */
+    fun keepBothAndOrganize(key: String, taken: Set<String>) = launchTask(Task.ORGANIZE) {
+        val plan = rows.firstOrNull { it.key == key }?.plan ?: return@launchTask
+        organizeSingle(key, Precheck.uniqueName(plan.targetName, taken + plan.targetName))
+    }
 
     fun scrapeOne(key: String) = launchTask(Task.SCRAPE) {
         val s = storage ?: return@launchTask
