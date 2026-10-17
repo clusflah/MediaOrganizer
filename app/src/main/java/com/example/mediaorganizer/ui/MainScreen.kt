@@ -34,6 +34,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.example.mediaorganizer.*
 import com.example.mediaorganizer.metadata.MediaMatcher
+import com.example.mediaorganizer.naming.Conflict
+import com.example.mediaorganizer.naming.ConflictAction
+import com.example.mediaorganizer.naming.ConflictKind
 import com.example.mediaorganizer.metadata.MediaType
 import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.settings.AppSettings
@@ -56,7 +59,6 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
     val s = vm.settings
     var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.tmdbToken.isBlank()) }
     var detailKey by remember { mutableStateOf<String?>(null) }
-    var askOrganize by remember { mutableStateOf(false) }
     var askUndo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
@@ -89,7 +91,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
         bottomBar = {
             BottomBar(
                 vm, counts,
-                onOrganize = { askOrganize = true },
+                onOrganize = vm::startOrganize,
                 onShowPending = { showFilter(it) },
             )
         },
@@ -153,19 +155,13 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
         })
     }
     vm.leftovers?.let { found ->
-        LeftoversDialog(found, vm.settings.cleanupMode, onDelete = vm::deleteLeftovers, onDismiss = vm::dismissLeftovers)
+        LeftoversDialog(found, vm.settings.cleanupMode, vm.settings.scanDir, onDelete = vm::deleteLeftovers, onDismiss = vm::dismissLeftovers)
     }
     if (askUndo) vm.undoSummary()?.let { sum ->
         UndoConfirmDialog(sum, onConfirm = { askUndo = false; vm.undo() }, onDismiss = { askUndo = false })
     }
-    if (askOrganize) {
-        val summary = remember { vm.organizeSummary() }
-        OrganizeConfirmDialog(
-            summary, s,
-            onConfirm = { askOrganize = false; vm.execute() },
-            onDismiss = { askOrganize = false },
-            onOpenRow = { askOrganize = false; detailKey = it },
-        )
+    vm.precheck?.let { pc ->
+        PrecheckScreen(vm, pc, s, onOpenRow = { vm.dismissPrecheck(); detailKey = it })
     }
 }
 
@@ -186,7 +182,9 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
             text = {
                 Column {
                     Text("撤销上次整理")
-                    if (undo != null) Text(
+                    if (undo == null) Text("暂无可撤销的操作", style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.outline)
+                    else Text(
                         "${formatTime(undo.time)} · ${undo.moved} 个文件",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
                     )
@@ -515,7 +513,7 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(selected = vm.filter == null, onClick = { vm.filter = null }, label = { Text("全部 ${vm.rows.size}") })
-            for (c in listOf(RowCategory.PENDING, RowCategory.READY, RowCategory.UNMATCHED, RowCategory.FAILED, RowCategory.DONE, RowCategory.EXCLUDED)) {
+            for (c in listOf(RowCategory.PENDING, RowCategory.READY, RowCategory.UNMATCHED, RowCategory.FAILED, RowCategory.DONE, RowCategory.EXCLUDED, RowCategory.DELETED)) {
                 val n = counts[c] ?: 0
                 if (n == 0 && vm.filter != c && c !in setOf(RowCategory.PENDING, RowCategory.READY)) continue
                 FilterChip(selected = vm.filter == c, onClick = { vm.filter = c }, label = { Text("${c.label} $n") })
@@ -560,6 +558,7 @@ private fun pillOf(row: MediaRow): Pair<String, Color> {
         RowCategory.FAILED -> "失败" to Red
         RowCategory.DONE -> if (row.outcome == "无需改动") "无需改动" to Gray else "已完成" to Green
         RowCategory.EXCLUDED -> "已排除" to Gray
+        RowCategory.DELETED -> "已删除" to Gray
     }
 }
 
@@ -653,7 +652,7 @@ private fun BottomBar(
                     Spacer(Modifier.width(12.dp))
                     OutlinedButton(onClick = vm::stopScan) { Text("停止") }
                 }
-                Task.ORGANIZE, Task.SCRAPE, Task.UNDO, Task.CLEAN -> {
+                Task.PRECHECK, Task.ORGANIZE, Task.SCRAPE, Task.UNDO, Task.CLEAN -> {
                     Text(vm.status, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Spacer(Modifier.height(6.dp))
                     val p = vm.progress
@@ -697,68 +696,247 @@ private fun BottomBar(
 
 // ============================ 对话框 ============================
 
-private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆对话框
+private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆页面
 
-/** 整理前确认：每一类都能展开看具体文件，点文件进详情改匹配或排除 */
+private fun sizeText(bytes: Long?): String = when {
+    bytes == null || bytes <= 0 -> ""
+    bytes >= 1L shl 30 -> "%.1f GB".format(bytes / (1L shl 30).toDouble())
+    bytes >= 1L shl 20 -> "%.0f MB".format(bytes / (1L shl 20).toDouble())
+    else -> "%.0f KB".format(bytes / 1024.0)
+}
+
+/** 目录树里的一行 */
+private data class TreeLine(val depth: Int, val name: String, val isDir: Boolean, val isNew: Boolean, val generated: Boolean)
+
+/** 把一堆完整路径排成缩进的目录树；videos 是视频，generated 是刮削会写的文件 */
+private fun buildTree(videos: List<String>, generated: List<String>, newDirs: Set<String>, limit: Int = 2000): List<TreeLine> {
+    val gen = generated.toSet()
+    val all = (videos + generated).distinct().sorted()
+    val seenDirs = HashSet<String>()
+    val out = mutableListOf<TreeLine>()
+    for (p in all) {
+        val segs = p.trim('/').split('/')
+        var cur = ""
+        for ((i, seg) in segs.withIndex()) {
+            cur += "/$seg"
+            val last = i == segs.lastIndex
+            if (!last) {
+                if (seenDirs.add(cur)) out += TreeLine(i, seg, isDir = true, isNew = cur in newDirs, generated = false)
+            } else out += TreeLine(i, seg, isDir = false, isNew = false, generated = p in gen)
+            if (out.size >= limit) return out
+        }
+    }
+    return out
+}
+
+/** 整理前预检：概览 / 问题（逐项选择处理方式）/ 整理后目录树 */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun OrganizeConfirmDialog(
-    sum: OrganizeSummary, s: AppSettings,
-    onConfirm: () -> Unit, onDismiss: () -> Unit, onOpenRow: (String) -> Unit,
+private fun PrecheckScreen(
+    vm: MainViewModel, pc: MainViewModel.PrecheckState, s: AppSettings,
+    onOpenRow: (String) -> Unit,
 ) {
-    var open by remember { mutableStateOf(if (sum.duplicates.isNotEmpty()) "dup" else "") }
+    val conflicts = pc.result.conflicts
+    var tab by remember { mutableIntStateOf(if (conflicts.isNotEmpty()) 1 else 0) }
+    var open by remember { mutableStateOf("") }
     fun toggle(id: String) { open = if (open == id) "" else id }
-    val dupCount = sum.duplicates.sumOf { it.second.size }
+    val sum = pc.summary
+    val cloud = s.storageType == StorageType.PAN115 || s.storageType == StorageType.ALIYUN
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("整理 ${sum.total} 个文件？") },
-        text = {
-            LazyColumn {
-                if (sum.duplicates.isNotEmpty()) {
-                    item { GroupHeader("目标重名", dupCount, Orange, open == "dup") { toggle("dup") } }
-                    if (open == "dup") {
-                        item {
-                            Text("每组只有第一个会整理，其余标为失败。点文件可改匹配或排除。",
-                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                modifier = Modifier.padding(bottom = 4.dp))
+    // 按当前选择估算：会整理多少、跳过多少、删除多少
+    val chosen = conflicts.groupingBy { vm.actionFor(it) }.eachCount()
+    val skipCount = chosen[ConflictAction.SKIP] ?: 0
+    val deleteCount = chosen[ConflictAction.DELETE_SOURCE] ?: 0
+    val runCount = sum.total - skipCount - deleteCount
+
+    androidx.compose.ui.window.Dialog(
+        onDismissRequest = vm::dismissPrecheck,
+        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    navigationIcon = { IconButton(onClick = vm::dismissPrecheck) { Icon(Icons.Default.Close, "取消") } },
+                    title = { Text("整理前预检") },
+                )
+            },
+            bottomBar = {
+                Surface(tonalElevation = 3.dp) {
+                    Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                        Text(
+                            buildString {
+                                append("将整理 $runCount 个")
+                                if (skipCount > 0) append("，跳过 $skipCount 个")
+                                if (deleteCount > 0) append("，删除 $deleteCount 个")
+                                if (sum.notIncluded > 0) append("；待确认等 ${sum.notIncluded} 个不受影响")
+                            },
+                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.padding(bottom = 8.dp),
+                        )
+                        Button(onClick = vm::executeChecked, enabled = runCount + deleteCount > 0, modifier = Modifier.fillMaxWidth().height(48.dp)) {
+                            Text(if (runCount > 0) "开始整理 $runCount 项" else "执行")
                         }
-                        sum.duplicates.take(LIST_LIMIT).forEach { (target, list) ->
-                            item {
-                                Text("→ " + shortTarget(target, s), style = MaterialTheme.typography.bodySmall,
-                                    fontWeight = FontWeight.Medium, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+            },
+        ) { padding ->
+            Column(Modifier.padding(padding).fillMaxSize()) {
+                TabRow(selectedTabIndex = tab) {
+                    Tab(tab == 0, { tab = 0 }, text = { Text("概览") })
+                    Tab(tab == 1, { tab = 1 }, text = { Text(if (conflicts.isEmpty()) "问题" else "问题 ${conflicts.size}") })
+                    Tab(tab == 2, { tab = 2 }, text = { Text("目录树") })
+                }
+                when (tab) {
+                    0 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                        item {
+                            Text(
+                                if (conflicts.isEmpty()) "✓ 没有发现冲突，目标位置都可以安全写入"
+                                else "⚠ 发现 ${conflicts.size} 个问题，已按「不动你的文件」的方式预选处理，可在「问题」里逐项修改",
+                                color = if (conflicts.isEmpty()) Green else Orange,
+                                style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(bottom = 8.dp),
+                            )
+                            if (pc.result.newDirs.isNotEmpty()) Text("将新建 ${pc.result.newDirs.size} 个文件夹",
+                                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 4.dp))
+                            if (s.autoScrape) Text(
+                                "整理后刮削，预计写入 ${pc.scrapeFiles.size}${if (pc.scrapeCapped) "+" else ""} 个 NFO / 图片（见「目录树」）",
+                                style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 4.dp),
+                            )
+                        }
+                        moveGroup("移动到影视库", "move", sum.moves, s, open, ::toggle, onOpenRow)
+                        moveGroup("原地改名", "rename", sum.renames, s, open, ::toggle, onOpenRow)
+                        moveGroup("已在目标位置，不动", "same", sum.unchanged, s, open, ::toggle, onOpenRow)
+                        item {
+                            Text(
+                                when (s.cleanupMode) {
+                                    CleanupMode.OFF -> "原文件夹保留不动。"
+                                    CleanupMode.EMPTY_ONLY -> "整理后删除变空的原文件夹。"
+                                    CleanupMode.LEFTOVERS -> "整理后删除原文件夹（连同残留的 NFO、图片等）；还有其他视频或字幕的文件夹保留。"
+                                },
+                                style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(top = 12.dp),
+                            )
+                            Text("整理后可在菜单里撤销（删除的文件除外）。", style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 4.dp))
+                        }
+                    }
+
+                    1 -> LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp)) {
+                        if (conflicts.isEmpty()) item { Text("没有问题需要处理", color = MaterialTheme.colorScheme.outline) }
+                        for (kind in ConflictKind.entries) {
+                            val list = conflicts.filter { it.kind == kind }
+                            if (list.isEmpty()) continue
+                            item(key = "h-$kind") {
+                                Column(Modifier.padding(top = 8.dp, bottom = 4.dp)) {
+                                    Text("${kind.label} · ${list.size}", fontWeight = FontWeight.Bold,
+                                        color = if (kind == ConflictKind.MISSING_META) MaterialTheme.colorScheme.onSurface else Orange)
+                                    Text(
+                                        when (kind) {
+                                            ConflictKind.EXISTS -> "影视库里已经有同名文件，可能是重复下载或更好 / 更差的版本"
+                                            ConflictKind.DUPLICATE -> "和本批次另一个文件整理到同一个名字，第一个照常整理，下面这些需要处理"
+                                            ConflictKind.MISSING_META -> "能整理，但名称里可能缺少年份或集数"
+                                        },
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    // 整组一键设置
+                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
+                                        list.first().actions.forEach { a ->
+                                            AssistChip(onClick = { list.forEach { vm.conflictActions[it.key] = a } }, label = { Text("全部${a.label}", fontSize = 12.sp) })
+                                        }
+                                    }
+                                }
                             }
-                            items(list) { m ->
-                                MoveLine(m, s, showTarget = false, mark = if (m == list.first()) "整理" else "跳过") { onOpenRow(m.key) }
+                            items(list.take(LIST_LIMIT), key = { "c-${it.key}" }) { c -> ConflictRow(vm, c, s, cloud, onOpenRow) }
+                            if (list.size > LIST_LIMIT) item {
+                                Text("…还有 ${list.size - LIST_LIMIT} 个，可用上面的「全部…」统一处理",
+                                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                            }
+                        }
+                    }
+
+                    else -> {
+                        val tree = remember(pc) {
+                            buildTree(
+                                videos = (sum.moves + sum.renames + sum.unchanged).map { it.to },
+                                generated = pc.scrapeFiles, newDirs = pc.result.newDirs,
+                            )
+                        }
+                        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)) {
+                            item {
+                                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), modifier = Modifier.padding(bottom = 6.dp)) {
+                                    Text("■ 视频", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
+                                    Text("■ 刮削生成", fontSize = 11.sp, color = MaterialTheme.colorScheme.outline)
+                                    Text("新 = 将新建的文件夹", fontSize = 11.sp, color = Green)
+                                }
+                            }
+                            items(tree.size) { i ->
+                                val t = tree[i]
+                                Row(Modifier.padding(start = (t.depth * 14).dp, top = 1.dp, bottom = 1.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        (if (t.isDir) "▾ " else "  ") + t.name,
+                                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace, fontSize = 12.sp,
+                                        fontWeight = if (t.isDir) FontWeight.Medium else FontWeight.Normal,
+                                        color = when {
+                                            t.isDir -> MaterialTheme.colorScheme.onSurface
+                                            t.generated -> MaterialTheme.colorScheme.outline
+                                            else -> MaterialTheme.colorScheme.primary
+                                        },
+                                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false),
+                                    )
+                                    if (t.isNew) {
+                                        Spacer(Modifier.width(6.dp))
+                                        Pill("新", Green)
+                                    }
+                                }
+                            }
+                            if (tree.size >= 2000 || pc.scrapeCapped) item {
+                                Text("文件较多，只显示了一部分", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                                    modifier = Modifier.padding(top = 8.dp))
                             }
                         }
                     }
                 }
-                moveGroup("移动到影视库", "move", sum.moves, s, open, ::toggle, onOpenRow)
-                moveGroup("原地改名", "rename", sum.renames, s, open, ::toggle, onOpenRow)
-                moveGroup("已在目标位置，不动", "same", sum.unchanged, s, open, ::toggle, onOpenRow)
-                item {
-                    if (sum.notIncluded > 0) Text(
-                        "待确认、未匹配和已排除的 ${sum.notIncluded} 个不受影响",
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 8.dp),
-                    )
-                    Text(
-                        when (s.cleanupMode) {
-                            CleanupMode.OFF -> "原文件夹保留不动。"
-                            CleanupMode.EMPTY_ONLY -> "整理后删除变空的原文件夹。"
-                            CleanupMode.LEFTOVERS -> "整理后删除原文件夹（连同残留的 NFO、图片等）；还有其他视频或字幕的文件夹保留。"
-                        },
-                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(top = 6.dp),
-                    )
-                    Text("目标已存在的文件不会被覆盖；整理后可在菜单里撤销（删掉的残留文件除外）。", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline, modifier = Modifier.padding(top = 6.dp))
-                }
             }
-        },
-        confirmButton = { Button(onClick = onConfirm) { Text("开始整理") } },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("取消") } },
-    )
+        }
+    }
+}
+
+@Composable
+private fun ConflictRow(vm: MainViewModel, c: Conflict, s: AppSettings, cloud: Boolean, onOpenRow: (String) -> Unit) {
+    val action = vm.actionFor(c)
+    val src = c.plan.item.file
+    Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
+        Text(src.name, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium,
+            maxLines = 2, overflow = TextOverflow.Ellipsis, modifier = Modifier.clickable { onOpenRow(c.key) })
+        Text(
+            listOf(sizeText(src.size), src.path.substringBeforeLast('/')).filter { it.isNotEmpty() }.joinToString(" · "),
+            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis,
+        )
+        Text("→ " + shortTarget(c.plan.targetPath, s), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary,
+            maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+            c.detail + (c.existingSize?.let { "（已有 ${sizeText(it)}，本文件 ${sizeText(src.size)}）" } ?: ""),
+            style = MaterialTheme.typography.bodySmall, color = Orange,
+        )
+        @OptIn(ExperimentalLayoutApi::class)
+        FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            c.actions.forEach { a ->
+                FilterChip(selected = action == a, onClick = { vm.conflictActions[c.key] = a }, label = { Text(a.label, fontSize = 12.sp) })
+            }
+        }
+        when (action) {
+            ConflictAction.OVERWRITE -> Text(
+                "会先删除影视库里的旧文件" + if (cloud) "（进网盘回收站）" else "，无法撤销",
+                style = MaterialTheme.typography.labelSmall, color = Red,
+            )
+            ConflictAction.DELETE_SOURCE -> Text(
+                "会删除这个源文件" + if (cloud) "（进网盘回收站）" else "，无法撤销",
+                style = MaterialTheme.typography.labelSmall, color = Red,
+            )
+            ConflictAction.KEEP_BOTH -> Text("新文件名后加 (2)", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+            else -> {}
+        }
+        HorizontalDivider(Modifier.padding(top = 6.dp))
+    }
 }
 
 private fun androidx.compose.foundation.lazy.LazyListScope.moveGroup(
@@ -806,7 +984,7 @@ private fun MoveLine(m: PlannedMove, s: AppSettings, showTarget: Boolean, mark: 
 /** 手动清理前确认：列出每个要删的文件夹和里面的东西，可逐个取消勾选 */
 @Composable
 private fun LeftoversDialog(
-    found: List<CleanupTarget>, mode: CleanupMode,
+    found: List<CleanupTarget>, mode: CleanupMode, scanDir: String,
     onDelete: (List<CleanupTarget>) -> Unit, onDismiss: () -> Unit,
 ) {
     var chosen by remember(found) { mutableStateOf(found.map { it.dir }.toSet()) }
@@ -821,6 +999,11 @@ private fun LeftoversDialog(
                         else if (mode == CleanupMode.EMPTY_ONLY) "这些文件夹是空的（系统缓存文件不算）。"
                         else "这些文件夹里没有视频和字幕，只剩 NFO、图片、txt 等残留。删除后无法撤销。",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 4.dp),
+                    )
+                    if (found.isNotEmpty()) Text(
+                        "扫描范围：${normalizePath(scanDir)}。下列文件夹都在范围内；扫描目录本身和影视库目录不会删除。",
+                        style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
                 }
@@ -832,7 +1015,8 @@ private fun LeftoversDialog(
                     ) {
                         Checkbox(checked = t.dir in chosen, onCheckedChange = null, modifier = Modifier.padding(top = 2.dp, end = 8.dp))
                         Column {
-                            Text(t.dir, style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
+                            Text(t.dir.removePrefix(normalizePath(scanDir).trimEnd('/')).ifEmpty { t.dir },
+                                style = MaterialTheme.typography.bodySmall, fontWeight = FontWeight.Medium)
                             Text(
                                 if (t.files == 0) "空文件夹" else "${t.files} 个文件：" + t.sample.joinToString("、") +
                                     if (t.files > t.sample.size) " …" else "",
@@ -915,7 +1099,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     val effective = if (pickChanged) picked else row.chosen
     val scrapeSuffix = if (vm.settings.autoScrape) "+刮削" else ""
     // 已完成的也能改匹配（选错了可以纠正），改完回到「可整理」再整理一次
-    val canChange = !vm.busy
+    val canChange = !vm.busy && row.category != RowCategory.DELETED
     val canExclude = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
 
     fun doSearch() {

@@ -381,3 +381,10 @@ class NfoWriter(
         .replace("\"", "&quot;").replace("'", "&apos;")
         .replace(Regex("""[\u0000-\u0008\u000B\u000C\u000E-\u001F]"""), "")
 }
+
+/** 不联网的图片来源：只为算出文件清单，logo 一律当作有 */
+object DryScrapeSource : ScrapeSource {
+    override fun imageUrl(path: String, size: String) = "dry:$size$path"
+    override suspend fun logoPath(type: MediaType, id: Int) = "/logo"
+    override suspend fun download(url: String) = ByteArray(0)
+}

@@ -28,6 +28,7 @@ import com.example.mediaorganizer.storage.CleanupMode
 import com.example.mediaorganizer.storage.CleanupReport
 import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.FileOperation
+import com.example.mediaorganizer.storage.NoOpStorage
 import com.example.mediaorganizer.storage.SourceCleaner
 import com.example.mediaorganizer.storage.OperationLog
 import com.example.mediaorganizer.storage.RemoteFile
@@ -89,6 +90,7 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
 /** 列表里每个文件所处的状态，枚举顺序 = 「全部」视图里的排序（要处理的排前面） */
 enum class RowCategory(val label: String) {
     PENDING("待确认"), UNMATCHED("未匹配"), FAILED("失败"), READY("可整理"), DONE("已完成"), EXCLUDED("已排除"),
+    DELETED("已删除"),
 }
 
 data class MediaRow(
@@ -96,13 +98,14 @@ data class MediaRow(
     val chosen: TmdbSearchResult?,
     val confirmed: Boolean,
     val plan: RenamePlan? = null,
-    val outcome: String? = null,     // null=未执行, "ok", "无需改动", 或错误信息
+    val outcome: String? = null,     // null=未执行, "ok", "无需改动", "已删除", 或错误信息
     val excluded: Boolean = false,   // 用户选择不整理
 ) {
     val key: String get() = match.file?.path ?: match.parsed.rawName
 
     val category: RowCategory get() = when {
         outcome == "ok" || outcome == "无需改动" -> RowCategory.DONE
+        outcome == DELETED_OUTCOME -> RowCategory.DELETED
         outcome != null -> RowCategory.FAILED
         excluded -> RowCategory.EXCLUDED
         chosen == null -> RowCategory.UNMATCHED
@@ -117,6 +120,8 @@ data class MediaRow(
         (if (match.parsed.isEpisode) "tv|" else "mv|") + match.parsed.title.lowercase().filter { it.isLetterOrDigit() }
 }
 
+const val DELETED_OUTCOME = "已删除"
+
 /** 连接测试的一项结果 */
 data class ConnCheck(val label: String, val level: Level, val detail: String) {
     enum class Level { OK, WARN, FAIL }
@@ -124,7 +129,7 @@ data class ConnCheck(val label: String, val level: Level, val detail: String) {
 
 enum class ConnState { UNTESTED, OK, FAIL }
 
-enum class Task { SCAN, TEST, MATCH, ORGANIZE, SCRAPE, UNDO, CLEAN }
+enum class Task { SCAN, TEST, MATCH, PRECHECK, ORGANIZE, SCRAPE, UNDO, CLEAN }
 
 /** 撤销前给用户看的汇总 */
 data class UndoSummary(
@@ -198,7 +203,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             settings = runCatching { repo.load() }.getOrDefault(AppSettings())
             lastOps = opLog.load()               // 上次没撤销的批次，重启后仍可撤销
-            canUndo = lastOps.isNotEmpty()
+            canUndo = undoSummary() != null
             if (canUndo) status = "上次整理了 ${undoSummary()?.moved ?: 0} 个文件，可在右上角菜单里撤销"
             loaded = true
         }
@@ -323,7 +328,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private fun rememberOps(ops: List<FileOperation>, append: Boolean) {
         lastOps = if (append) lastOps + ops else ops
         opLog.save(lastOps)
-        canUndo = lastOps.isNotEmpty()
+        canUndo = undoSummary() != null
     }
 
     private fun launchTask(t: Task, block: suspend () -> Unit) {
@@ -524,6 +529,95 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun execute() = launchTask(Task.ORGANIZE) { runOrganize(organizable(), single = false) }
 
+    // ---------- 整理前预检 ----------
+
+    /** 预检结果 + 预计生成的刮削文件；非 null 时显示预检页 */
+    data class PrecheckState(
+        val result: PrecheckResult,
+        val summary: OrganizeSummary,
+        val scrapeFiles: List<String>,      // 整理后会刮削出的文件（不含 Fanart.tv 等补充来源）
+        val scrapeCapped: Boolean,          // 文件太多时只算了前一部分
+    )
+
+    var precheck by mutableStateOf<PrecheckState?>(null)
+        private set
+    /** 用户为每个问题文件选的处理方式；没选的用 Conflict.actions 的第一个 */
+    val conflictActions = mutableStateMapOf<String, ConflictAction>()
+
+    fun actionFor(c: Conflict) = conflictActions[c.key] ?: c.actions.first()
+
+    /** 点「整理」先预检：查目标位置、撞名、元数据，再给用户看 */
+    fun startOrganize() = launchTask(Task.PRECHECK) {
+        val s = storage ?: return@launchTask
+        val items = organizable().map { it.value.key to it.value.plan!! }
+        if (items.isEmpty()) return@launchTask
+        status = "预检中…"
+        val result = Precheck(s).run(items) { done, total ->
+            progress = done to total
+            status = "预检中：检查目标目录 $done/$total"
+        }
+        val (files, capped) = if (settings.autoScrape) scrapePreview(items.map { it.second }) else emptyList<String>() to false
+        conflictActions.clear()
+        precheck = PrecheckState(result, organizeSummary(), files, capped)
+        status = if (result.conflicts.isEmpty()) "预检通过，没有冲突" else "预检发现 ${result.conflicts.size} 个问题，请逐项确认"
+    }
+
+    fun dismissPrecheck() { precheck = null }
+
+    /** 用 TMDB 详情（整理计划时已缓存）算出会写哪些 NFO / 图片，不联网下载 */
+    private suspend fun scrapePreview(plans: List<RenamePlan>): Pair<List<String>, Boolean> {
+        val d = details ?: return emptyList<String>() to false
+        val limit = 300
+        val scraper = Scraper(NoOpStorage, d, DryScrapeSource)
+        val files = plans.take(limit).flatMap { p -> runCatching { scraper.collectOutputs(p, settings.scrape) }.getOrDefault(emptyList()) }
+            .map { normalizePath(it.path) }.distinct()
+        return files to (plans.size > limit)
+    }
+
+    /** 按预检页上的选择执行：跳过的标为已排除，删除的删掉源文件，其余照常整理 */
+    fun executeChecked() = launchTask(Task.ORGANIZE) {
+        val pc = precheck ?: return@launchTask
+        precheck = null
+        val s = storage ?: return@launchTask
+        val taken = pc.result.existingNames.mapValues { it.value.toMutableSet() }.toMutableMap()
+        val toRun = mutableListOf<IndexedValue<MediaRow>>()
+        var deleted = 0
+        var skipped = 0
+        val errors = mutableListOf<String>()
+        for ((i, row) in organizable()) {
+            val plan = row.plan!!
+            val c = pc.result.conflictOf(row.key)
+            when (c?.let { actionFor(it) } ?: ConflictAction.PROCEED) {
+                ConflictAction.PROCEED -> toRun += IndexedValue(i, row)
+                ConflictAction.SKIP -> { rows[i] = row.copy(excluded = true, plan = null); skipped++ }
+                ConflictAction.DELETE_SOURCE -> runCatching { s.delete(row.match.file!!) }
+                    .onSuccess { rows[i] = row.copy(outcome = DELETED_OUTCOME); deleted++ }
+                    .onFailure { errors += "${row.match.file?.name}：${it.message}" }
+                ConflictAction.OVERWRITE -> runCatching {
+                    s.delete(RemoteFile(plan.targetPath, plan.targetName, isDirectory = false))
+                }.onSuccess { toRun += IndexedValue(i, row) }
+                    .onFailure { errors += "${plan.targetName}：删除旧文件失败 ${it.message}" }
+                ConflictAction.KEEP_BOTH -> {
+                    val dir = normalizePath(plan.targetDir)
+                    val names = taken.getOrPut(dir) { mutableSetOf() }
+                    // 本批次里其他文件占用的名字也要避开
+                    toRun.filter { normalizePath(it.value.plan!!.targetDir) == dir }.forEach { names += it.value.plan!!.targetName }
+                    val newName = Precheck.uniqueName(plan.targetName, names)
+                    names += newName
+                    rows[i] = row.copy(plan = plan.copy(targetName = newName))
+                    toRun += IndexedValue(i, rows[i])
+                }
+            }
+        }
+        runOrganize(toRun, single = false)
+        val extra = listOfNotNull(
+            if (skipped > 0) "跳过 $skipped" else null,
+            if (deleted > 0) "删除 $deleted" else null,
+            if (errors.isNotEmpty()) "${errors.size} 项处理失败（${errors.first()}）" else null,
+        )
+        if (extra.isNotEmpty()) status += "；" + extra.joinToString("，")
+    }
+
     /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
     fun organizeOne(key: String) = launchTask(Task.ORGANIZE) { organizeSingle(key) }
 
@@ -639,9 +733,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
     }
 
+    /** 没有移动 / 新写入任何文件的批次不算可撤销（只有建目录之类的记录） */
     fun undoSummary(): UndoSummary? {
         val ops = lastOps.takeIf { it.isNotEmpty() } ?: return null
         val moves = ops.filter { it.type == FileOperation.Type.MOVE || it.type == FileOperation.Type.RENAME }
+        if (moves.isEmpty() && ops.none { it.type == FileOperation.Type.UPLOAD }) return null
         return UndoSummary(
             time = ops.maxOf { it.timestamp },
             moved = moves.size,

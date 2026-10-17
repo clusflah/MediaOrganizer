@@ -12,7 +12,7 @@ import com.example.mediaorganizer.scraper.ScrapeSource
 import com.example.mediaorganizer.scraper.ScrapeTemplate
 import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.storage.RemoteFile
-import com.example.mediaorganizer.storage.StorageProvider
+import com.example.mediaorganizer.storage.NoOpStorage
 import com.example.mediaorganizer.storage.normalizePath
 import java.io.InputStream
 
@@ -43,7 +43,7 @@ object SamplePreviews {
             .plan(listOf(RenameItem(file, MediaNameParser.parse(name), match)), s.movieNaming, s.tvNaming)
             .single()
         val extras = if (s.scrape.extra.fanart) FakeExtras else null
-        val files = Scraper(NoStorage, FakeDetails, FakeSource, extras = extras).collectOutputs(plan, s.scrape)
+        val files = Scraper(NoOpStorage, FakeDetails, FakeSource, extras = extras).collectOutputs(plan, s.scrape)
             .map { normalizePath(it.path) }.distinct()
             .map { it.removePrefix("$root/") }
 
@@ -103,16 +103,4 @@ object SamplePreviews {
         override suspend fun download(url: String) = ByteArray(0)
     }
 
-    /** collectOutputs 不碰存储，这里只为满足构造参数 */
-    private object NoStorage : StorageProvider {
-        override val displayName = "preview"
-        override suspend fun connect() = Unit
-        override suspend fun list(dir: String) = emptyList<RemoteFile>()
-        override suspend fun exists(path: String) = false
-        override suspend fun mkdirs(path: String) = Unit
-        override suspend fun rename(file: RemoteFile, newName: String) = file
-        override suspend fun move(file: RemoteFile, targetDir: String) = file
-        override suspend fun upload(targetPath: String, data: InputStream, size: Long) = Unit
-        override suspend fun delete(file: RemoteFile) = Unit
-    }
 }
