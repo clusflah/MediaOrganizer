@@ -408,6 +408,8 @@ fun ScrapeSettingsScreen(
     tmdbChecks: List<ConnCheck>,
     testing: Boolean,
     onTestTmdb: () -> Unit,
+    sourceChecks: List<ConnCheck>,
+    onTestSources: () -> Unit,
     onBack: () -> Unit,
 ) {
     val c = settings.scrape
@@ -466,6 +468,45 @@ fun ScrapeSettingsScreen(
                     }
                 }
                 tmdbChecks.forEach { CheckLine(it) }
+            }
+
+            // ---------------- 补充来源 ----------------
+            Section("补充刮削来源") {
+                val x = c.extra
+                fun upX(n: com.example.mediaorganizer.metadata.extra.ExtraConfig) = update(c.copy(extra = n))
+                Hint("识别影片仍用 TMDB；下面的来源只补充信息，查不到或出错时自动跳过，不影响刮削。")
+                SwitchRow("豆瓣", x.douban, desc = "中文简介、豆瓣评分和豆瓣 ID。非官方接口，有频率限制，大量刮削时会慢一些") {
+                    upX(x.copy(douban = it))
+                }
+                SwitchRow("Bangumi 番组计划", x.bangumi, desc = "只用于动画：中文简介、Bangumi 评分和 ID") { upX(x.copy(bangumi = it)) }
+                if (x.douban || x.bangumi) CheckOption(
+                    "简介和评分优先用豆瓣 / Bangumi", x.preferDouban,
+                    desc = "关闭则用 TMDB 的；无论哪种，各家评分都会写进 NFO",
+                ) { upX(x.copy(preferDouban = it)) }
+                SwitchRow("TheTVDB", x.tvdb, desc = "写入 TVDB ID（无需 key）；填 key 后，TMDB 缺集标题 / 简介时用 TVDB 中文补上") {
+                    upX(x.copy(tvdb = it))
+                }
+                if (x.tvdb) {
+                    SettingField("TheTVDB API key（可选）", x.tvdbApiKey, password = true) { upX(x.copy(tvdbApiKey = it)) }
+                    SettingField("订阅 PIN（个人 key 需要）", x.tvdbPin, password = true) { upX(x.copy(tvdbPin = it)) }
+                }
+                SwitchRow("Fanart.tv", x.fanart, desc = "高清 logo、clearart、横幅、横版海报、光盘图（Infuse / Emby / Kodi 模板）") {
+                    upX(x.copy(fanart = it))
+                }
+                if (x.fanart) {
+                    SettingField("Fanart.tv API key（免费申请）", x.fanartApiKey, password = true) { upX(x.copy(fanartApiKey = it)) }
+                    if (x.fanartApiKey.isBlank()) Text("未填写 key 时不会下载 Fanart.tv 图片", color = Warn, style = MaterialTheme.typography.bodySmall)
+                }
+                if (x.douban || x.bangumi || x.tvdb || x.fanart) OutlinedButton(
+                    onClick = onTestSources, enabled = !testing, modifier = Modifier.padding(top = 6.dp),
+                ) {
+                    if (testing) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    Text("测试已开启的来源")
+                }
+                sourceChecks.forEach { CheckLine(it) }
             }
 
             // ---------------- 播放器兼容 ----------------

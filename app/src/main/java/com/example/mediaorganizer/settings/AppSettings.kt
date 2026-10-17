@@ -1,5 +1,6 @@
 package com.example.mediaorganizer.settings
 
+import com.example.mediaorganizer.metadata.extra.ExtraConfig
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeTemplate
@@ -188,6 +189,15 @@ object SettingsCodec {
         "${p}quality" to c.quality.name,
         "${p}cast" to c.cast.toString(),
         "${p}maxActors" to c.maxActors.toString(),
+        // 补充来源（键名带 src. 前缀，和上面背景图的 fanart 区分）
+        "${p}src.douban" to c.extra.douban.toString(),
+        "${p}src.bangumi" to c.extra.bangumi.toString(),
+        "${p}src.tvdb" to c.extra.tvdb.toString(),
+        "${p}src.fanart" to c.extra.fanart.toString(),
+        "${p}src.preferDouban" to c.extra.preferDouban.toString(),
+        "${p}src.tvdbApiKey" to c.extra.tvdbApiKey,
+        "${p}src.tvdbPin" to c.extra.tvdbPin,
+        "${p}src.fanartApiKey" to c.extra.fanartApiKey,
     )
 
     private fun decodeScrape(m: Map<String, String>, p: String, d: ScrapeConfig): ScrapeConfig {
@@ -206,6 +216,16 @@ object SettingsCodec {
             quality = r.enum("quality", d.quality),
             cast = r.bool("cast", d.cast),
             maxActors = r.str("maxActors", "").toIntOrNull()?.coerceIn(0, 100) ?: d.maxActors,
+            extra = ExtraConfig(
+                douban = r.bool("src.douban", d.extra.douban),
+                bangumi = r.bool("src.bangumi", d.extra.bangumi),
+                tvdb = r.bool("src.tvdb", d.extra.tvdb),
+                fanart = r.bool("src.fanart", d.extra.fanart),
+                preferDouban = r.bool("src.preferDouban", d.extra.preferDouban),
+                tvdbApiKey = r.str("src.tvdbApiKey", d.extra.tvdbApiKey),
+                tvdbPin = r.str("src.tvdbPin", d.extra.tvdbPin),
+                fanartApiKey = r.str("src.fanartApiKey", d.extra.fanartApiKey),
+            ),
         )
     }
 

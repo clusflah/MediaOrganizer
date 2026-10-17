@@ -25,6 +25,7 @@ class SettingsRepository(context: Context) {
     /** 这些字段加密后再存 */
     private val secretKeys = setOf(
         "password", "tmdbToken", "smbPassword", "pan115Cookie", "aliClientSecret", "aliRefreshToken",
+        "scrape.src.tvdbApiKey", "scrape.src.tvdbPin", "scrape.src.fanartApiKey",
     )
 
     suspend fun load(): AppSettings = withContext(Dispatchers.IO) {

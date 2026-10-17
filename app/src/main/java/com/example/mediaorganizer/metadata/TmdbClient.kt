@@ -74,6 +74,7 @@ data class TmdbTvShow(
     val creators: List<TmdbPerson> = emptyList(),
     val cast: List<TmdbPerson> = emptyList(),
     val status: String? = null,
+    val tvdbId: Int? = null,
 )
 
 data class TmdbSeasonSummary(val seasonNumber: Int, val name: String, val airYear: Int?, val episodeCount: Int, val posterPath: String?)
@@ -174,6 +175,7 @@ class TmdbClient(
             overview = j.str("overview"),
             genres = j.genres(),
             imdbId = j.optJSONObject("external_ids")?.str("imdb_id"),
+            tvdbId = j.optJSONObject("external_ids")?.optInt("tvdb_id", 0)?.takeIf { it > 0 },
             voteAverage = j.optDouble("vote_average", 0.0),
             posterPath = j.str("poster_path"),
             backdropPath = j.str("backdrop_path"),

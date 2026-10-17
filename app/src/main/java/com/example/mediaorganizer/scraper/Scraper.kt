@@ -1,6 +1,10 @@
 package com.example.mediaorganizer.scraper
 
 import com.example.mediaorganizer.metadata.MediaType
+import com.example.mediaorganizer.metadata.extra.EpisodeExtra
+import com.example.mediaorganizer.metadata.extra.ExtraConfig
+import com.example.mediaorganizer.metadata.extra.ExtraInfo
+import com.example.mediaorganizer.metadata.extra.MetadataExtras
 import com.example.mediaorganizer.metadata.TmdbEpisode
 import com.example.mediaorganizer.metadata.TmdbPerson
 import com.example.mediaorganizer.metadata.TmdbMovie
@@ -45,6 +49,7 @@ data class ScrapeConfig(
     val quality: ImageQuality = ImageQuality.ORIGINAL,
     val cast: Boolean = true,            // NFO 写入演职人员
     val maxActors: Int = 20,
+    val extra: ExtraConfig = ExtraConfig(),   // 豆瓣、Bangumi、TheTVDB、Fanart.tv
 )
 
 /** 图片来源，抽成接口方便测试；正式实现见 TmdbScrapeSource */
@@ -75,6 +80,7 @@ class Scraper(
     private val details: MediaDetails,
     private val source: ScrapeSource,
     private val storageId: String = "",
+    private val extras: MetadataExtras? = null,    // 豆瓣 / Bangumi / TheTVDB / Fanart.tv，可选
 ) {
     /**
      * @param plans 已经整理到位（或无需改名）的文件
@@ -147,8 +153,10 @@ class Scraper(
 
         if (!input.isEpisode) {
             val movie = details.movie(input.tmdbId)
-            val logo = if (c.logo) source.logoPath(MediaType.MOVIE, movie.id)?.let { Content.Image(source.imageUrl(it, "original")) } else null
-            if (c.nfo) add(joinPath(dir, "$base.nfo"), Content.Text(nfo.movie(movie)))
+            val ex = extras?.let { runCatching { it.forMovie(movie) }.getOrNull() }
+            val logo = if (!c.logo) null else ex?.art?.logo?.let { Content.Image(it) }
+                ?: source.logoPath(MediaType.MOVIE, movie.id)?.let { Content.Image(source.imageUrl(it, "original")) }
+            if (c.nfo) add(joinPath(dir, "$base.nfo"), Content.Text(nfo.movie(movie, ex)))
 
             // 独占文件夹用通用名；和别的电影混放时只能用“视频名-xxx”
             val generic = plan.ownFolder
@@ -160,6 +168,7 @@ class Scraper(
             if (ScrapeTemplate.INFUSE in t && generic && c.poster) {
                 add(joinPath(dir, "folder.jpg"), poster(movie.posterPath))   // 资源管理器/访达的文件夹封面
             }
+            if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) addFanart(ex, dir, if (generic) "" else "$base-", ::add)
             if (ScrapeTemplate.PLEX in t) {
                 if (c.poster) add(joinPath(dir, "$base.jpg"), poster(movie.posterPath))
                 if (c.fanart) add(joinPath(dir, "$base-fanart.jpg"), backdrop(movie.backdropPath))
@@ -173,12 +182,15 @@ class Scraper(
         val season = input.season ?: 1
         val ep = input.episode?.let { e -> details.episodes(show.id, season).firstOrNull { it.episodeNumber == e } }
 
+        val ex = extras?.let { runCatching { it.forShow(show) }.getOrNull() }
+
         // 剧集级（多集共用，汇总时自动去重）
-        if (c.nfo) add(joinPath(showDir, "tvshow.nfo"), Content.Text(nfo.tvShow(show)))
+        if (c.nfo) add(joinPath(showDir, "tvshow.nfo"), Content.Text(nfo.tvShow(show, ex)))
         if (c.poster) add(joinPath(showDir, "poster.jpg"), poster(show.posterPath))
         if (c.fanart) add(joinPath(showDir, "fanart.jpg"), backdrop(show.backdropPath))
-        if (c.logo) add(joinPath(showDir, "clearlogo.png"),
-            source.logoPath(MediaType.TV, show.id)?.let { Content.Image(source.imageUrl(it, "original")) })
+        if (c.logo) add(joinPath(showDir, "clearlogo.png"), ex?.art?.logo?.let { Content.Image(it) }
+            ?: source.logoPath(MediaType.TV, show.id)?.let { Content.Image(source.imageUrl(it, "original")) })
+        if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) addFanart(ex, showDir, "", ::add)
         if (ScrapeTemplate.INFUSE in t && c.poster) add(joinPath(showDir, "folder.jpg"), poster(show.posterPath))
 
         // 季海报
@@ -191,13 +203,31 @@ class Scraper(
         }
 
         // 单集
-        if (c.nfo) add(joinPath(dir, "$base.nfo"), Content.Text(nfo.episode(show, season, input.episode ?: 0, ep)))
+        if (c.nfo) {
+            // TMDB 没有这一集或只有「第 N 集」这种占位标题时，用 TheTVDB 的中文标题和简介补上
+            val epEx = if (ep == null || ep.name.isBlank() || GENERIC_EP.matches(ep.name) || ep.overview.isNullOrBlank())
+                extras?.let { runCatching { it.forEpisode(show, season, input.episode ?: 0) }.getOrNull() } else null
+            add(joinPath(dir, "$base.nfo"), Content.Text(nfo.episode(show, season, input.episode ?: 0, ep, epEx)))
+        }
         if (c.episodeThumb) {
             val still = backdrop(ep?.stillPath)
             if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) add(joinPath(dir, "$base-thumb.jpg"), still)
             if (ScrapeTemplate.PLEX in t) add(joinPath(dir, "$base.jpg"), still)
         }
         return out
+    }
+
+    /** Fanart.tv 的高清图：clearart、横幅、横版海报、光盘图（logo 已替换上面的 clearlogo） */
+    private fun addFanart(ex: ExtraInfo?, dir: String, prefix: String, add: (String, Content?) -> Unit) {
+        val a = ex?.art ?: return
+        a.clearart?.let { add(joinPath(dir, "${prefix}clearart.png"), Content.Image(it)) }
+        a.banner?.let { add(joinPath(dir, "${prefix}banner.jpg"), Content.Image(it)) }
+        a.landscape?.let { add(joinPath(dir, "${prefix}landscape.jpg"), Content.Image(it)) }
+        a.disc?.let { add(joinPath(dir, "${prefix}disc.png"), Content.Image(it)) }
+    }
+
+    companion object {
+        val GENERIC_EP = Regex("""第\s*\d+\s*集|Episode \d+""")
     }
 }
 
@@ -212,7 +242,7 @@ class NfoWriter(
     private val maxActors: Int = 20,
 ) {
 
-    fun movie(m: TmdbMovie): String = doc("movie") {
+    fun movie(m: TmdbMovie, ex: ExtraInfo? = null): String = doc("movie") {
         tag("title", m.title)
         tag("originaltitle", m.originalTitle)
         tag("sorttitle", m.title)
@@ -220,15 +250,17 @@ class NfoWriter(
         tag("premiered", m.releaseDate)
         tag("releasedate", m.releaseDate)
         tag("tagline", m.tagline)
-        tag("plot", m.overview)
-        tag("outline", m.overview)
+        val plot = ex?.plot ?: m.overview
+        tag("plot", plot)
+        tag("outline", plot)
         tag("runtime", m.runtime)
         m.genres.forEach { tag("genre", it) }
         m.countries.forEach { tag("country", it) }
         m.studios.take(3).forEach { tag("studio", it) }
-        rating(m.voteAverage)
+        rating(m.voteAverage, ex)
         uniqueId("tmdb", m.id.toString(), default = true)
         uniqueId("imdb", m.imdbId)
+        extraIds(ex)
         tag("tmdbid", m.id)
         tag("imdbid", m.imdbId)
         if (maxActors > 0) {
@@ -238,22 +270,26 @@ class NfoWriter(
         }
     }
 
-    fun tvShow(s: TmdbTvShow): String = doc("tvshow") {
+    fun tvShow(s: TmdbTvShow, ex: ExtraInfo? = null): String = doc("tvshow") {
         tag("title", s.name)
         tag("originaltitle", s.originalName)
         tag("showtitle", s.name)
         tag("year", s.firstAirYear)
         tag("premiered", s.firstAirDate)
         tag("status", s.status)
-        tag("plot", s.overview)
+        tag("plot", ex?.plot ?: s.overview)
         s.genres.forEach { tag("genre", it) }
         s.countries.forEach { tag("country", it) }
         s.studios.take(3).forEach { tag("studio", it) }
-        rating(s.voteAverage)
+        rating(s.voteAverage, ex)
         uniqueId("tmdb", s.id.toString(), default = true)
         uniqueId("imdb", s.imdbId)
+        val tvdb = ex?.tvdbId ?: s.tvdbId?.toString()
+        uniqueId("tvdb", tvdb)
+        extraIds(ex)
         tag("tmdbid", s.id)
         tag("imdbid", s.imdbId)
+        tag("tvdbid", tvdb)
         tag("season", -1)
         tag("episode", -1)
         if (maxActors > 0) {
@@ -262,12 +298,13 @@ class NfoWriter(
         }
     }
 
-    fun episode(s: TmdbTvShow, season: Int, episode: Int, e: TmdbEpisode?): String = doc("episodedetails") {
-        tag("title", e?.name ?: "第 $episode 集")
+    fun episode(s: TmdbTvShow, season: Int, episode: Int, e: TmdbEpisode?, extra: EpisodeExtra? = null): String = doc("episodedetails") {
+        val tmdbTitle = e?.name?.takeIf { it.isNotBlank() && !Scraper.GENERIC_EP.matches(it) }
+        tag("title", tmdbTitle ?: extra?.name ?: e?.name ?: "第 $episode 集")
         tag("showtitle", s.name)
         tag("season", season)
         tag("episode", episode)
-        tag("plot", e?.overview)
+        tag("plot", e?.overview?.takeIf { it.isNotBlank() } ?: extra?.plot)
         tag("aired", e?.airDate)
         tag("premiered", e?.airDate)
         if (e != null && e.voteAverage > 0) rating(e.voteAverage)
@@ -291,13 +328,28 @@ class NfoWriter(
             sb.append("  <uniqueid type=\"$type\"").append(if (default) " default=\"true\"" else "")
                 .append(">").append(escape(value)).append("</uniqueid>\n")
         }
-        fun rating(value: Double) {
-            if (value <= 0) return
-            val v = "%.1f".format(Locale.US, value)
-            sb.append("  <ratings>\n    <rating name=\"themoviedb\" max=\"10\" default=\"true\">\n")
-                .append("      <value>").append(v).append("</value>\n")
-                .append("    </rating>\n  </ratings>\n")
-            tag("rating", v)
+        /** 多来源评分都写进 <ratings>；default 和 <rating> 用首选来源（豆瓣 / Bangumi 开启并优先时） */
+        fun rating(tmdb: Double, ex: ExtraInfo? = null) {
+            val list = buildList {
+                if (tmdb > 0) add(Triple("themoviedb", tmdb, null as Int?))
+                ex?.doubanRating?.takeIf { it > 0 }?.let { add(Triple("douban", it, ex.doubanVotes)) }
+                ex?.bangumiRating?.takeIf { it > 0 }?.let { add(Triple("bangumi", it, ex.bangumiVotes)) }
+            }
+            if (list.isEmpty()) return
+            val preferred = ex?.preferredRating?.first?.takeIf { p -> list.any { it.first == p } } ?: list.first().first
+            sb.append("  <ratings>\n")
+            for ((name, v, votes) in list) {
+                sb.append("    <rating name=\"$name\" max=\"10\"").append(if (name == preferred) " default=\"true\"" else "").append(">\n")
+                sb.append("      <value>").append("%.1f".format(Locale.US, v)).append("</value>\n")
+                votes?.takeIf { it > 0 }?.let { sb.append("      <votes>").append(it).append("</votes>\n") }
+                sb.append("    </rating>\n")
+            }
+            sb.append("  </ratings>\n")
+            tag("rating", "%.1f".format(Locale.US, list.first { it.first == preferred }.second))
+        }
+        fun extraIds(ex: ExtraInfo?) {
+            uniqueId("douban", ex?.doubanId)
+            uniqueId("bangumi", ex?.bangumiId)
         }
         /** Emby 能识别 tmdbid 属性，直接关联到人物页 */
         fun person(name: String, p: TmdbPerson) {

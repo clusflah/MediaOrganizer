@@ -1,6 +1,10 @@
 package com.example.mediaorganizer.ui
 
 import com.example.mediaorganizer.metadata.*
+import com.example.mediaorganizer.metadata.extra.EpisodeExtra
+import com.example.mediaorganizer.metadata.extra.ExtraInfo
+import com.example.mediaorganizer.metadata.extra.FanartArt
+import com.example.mediaorganizer.metadata.extra.MetadataExtras
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.parser.MediaNameParser
 import com.example.mediaorganizer.scraper.Scraper
@@ -38,7 +42,8 @@ object SamplePreviews {
         val plan = RenamePlanner(FakeDetails, LibraryRoots(s.movieRoot, s.tvRoot))
             .plan(listOf(RenameItem(file, MediaNameParser.parse(name), match)), s.movieNaming, s.tvNaming)
             .single()
-        val files = Scraper(NoStorage, FakeDetails, FakeSource).collectOutputs(plan, s.scrape)
+        val extras = if (s.scrape.extra.fanart) FakeExtras else null
+        val files = Scraper(NoStorage, FakeDetails, FakeSource, extras = extras).collectOutputs(plan, s.scrape)
             .map { normalizePath(it.path) }.distinct()
             .map { it.removePrefix("$root/") }
 
@@ -83,6 +88,13 @@ object SamplePreviews {
         override suspend fun episodes(tvId: Int, season: Int) = (1..24).map {
             TmdbEpisode(season, it, if (season == 2 && it == 3) "罗斯的新女友" else "第 $it 集", null, null, "/e", 8.0)
         }
+    }
+
+    private object FakeExtras : MetadataExtras {
+        private val art = FanartArt("p:logo", "p:clearart", "p:banner", "p:landscape", "p:disc")
+        override suspend fun forMovie(m: TmdbMovie) = ExtraInfo(art = art)
+        override suspend fun forShow(s: TmdbTvShow) = ExtraInfo(art = art.copy(disc = null))
+        override suspend fun forEpisode(s: TmdbTvShow, season: Int, episode: Int): EpisodeExtra? = null
     }
 
     private object FakeSource : ScrapeSource {

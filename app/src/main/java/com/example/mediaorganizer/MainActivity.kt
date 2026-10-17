@@ -19,6 +19,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.mediaorganizer.metadata.*
+import com.example.mediaorganizer.metadata.extra.OnlineExtras
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.*
 import com.example.mediaorganizer.settings.AppSettings
@@ -78,6 +79,7 @@ fun AppRoot(vm: MainViewModel = viewModel()) {
         Page.SCRAPE -> ScrapeSettingsScreen(
             vm.settings, vm.saved, vm::updateSettings,
             tmdbChecks = vm.tmdbChecks, testing = vm.task == Task.TEST, onTestTmdb = vm::testTmdb,
+            sourceChecks = vm.sourceChecks, onTestSources = vm::testSources,
         ) { page = Page.MAIN }
     }
 }
@@ -627,7 +629,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val d = details ?: return
         val t = tmdb ?: return
         progress = null
-        val report = Scraper(s, d, TmdbScrapeSource(t), storageId).scrape(plans, config) { done, total ->
+        val extras = config.extra.takeIf { it.douban || it.bangumi || it.tvdb || it.fanart }?.let { OnlineExtras(it) }
+        val report = Scraper(s, d, TmdbScrapeSource(t), storageId, extras).scrape(plans, config) { done, total ->
             progress = done to total
             status = "${prefix}刮削中 $done/$total"
         }
@@ -742,6 +745,22 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: Exception) {
             if (e is CancellationException) throw e
             add(ConnCheck("图片", ConnCheck.Level.FAIL, "图片下载失败：${connErrorText(e)}"))
+        }
+    }
+
+    /** 测试已开启的补充刮削来源（豆瓣 / Bangumi / TheTVDB / Fanart.tv） */
+    var sourceChecks by mutableStateOf<List<ConnCheck>>(emptyList())
+        private set
+
+    fun testSources() = launchTask(Task.TEST) {
+        sourceChecks = emptyList()
+        val results = OnlineExtras(settings.scrape.extra).test()
+        sourceChecks = if (results.isEmpty()) listOf(ConnCheck("来源", ConnCheck.Level.WARN, "没有开启任何补充来源"))
+        else results.map { (name, r) ->
+            r.fold(
+                { ConnCheck(name, ConnCheck.Level.OK, it) },
+                { ConnCheck(name, ConnCheck.Level.FAIL, it.message ?: it.javaClass.simpleName) },
+            )
         }
     }
 
