@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 只管启动时的窗口底色；界面配色在 Compose 里（ui/Theme.kt） -->
+    <style name="Theme.MediaOrganizer" parent="@android:style/Theme.Material.Light.NoActionBar" />
+</resources>

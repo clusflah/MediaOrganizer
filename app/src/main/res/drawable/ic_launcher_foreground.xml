@@ -1,11 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 胶片 + 播放三角 -->
+<!-- 文件夹 + 镂空播放键：整理影视。两层白色，后片半透明；播放键是镂空，透出背景渐变 -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
-    <path android:fillColor="#FFFFFF"
-        android:pathData="M34,36h40a4,4 0,0 1,4 4v28a4,4 0,0 1,-4 4h-40a4,4 0,0 1,-4 -4v-28a4,4 0,0 1,4 -4z" />
-    <path android:fillColor="#3949AB" android:pathData="M48,45l14,9 -14,9z" />
-    <path android:fillColor="#3949AB"
-        android:pathData="M34,40h4v4h-4zM34,50h4v4h-4zM34,60h4v4h-4zM70,40h4v4h-4zM70,50h4v4h-4zM70,60h4v4h-4z" />
+    <!-- 后片（带标签） -->
+    <path android:fillColor="#FFFFFF" android:fillAlpha="0.6"
+        android:pathData="M36,34h11.5a3,3 0,0 1,2.4 1.2L52.5,38.5H72a4,4 0,0 1,4 4V48H32V38a4,4 0,0 1,4 -4z" />
+    <!-- 前片 + 圆角播放三角 -->
+    <path android:fillColor="#FFFFFF" android:fillType="evenOdd"
+        android:pathData="M36,43H72a4,4 0,0 1,4 4V68a4,4 0,0 1,-4 4H36a4,4 0,0 1,-4 -4V47a4,4 0,0 1,4 -4z
+            M49.5,51.7Q49.5,49.5 51.4,50.6L61.1,56.4Q63,57.5 61.1,58.6L51.4,64.4Q49.5,65.5 49.5,63.3z" />
 </vector>

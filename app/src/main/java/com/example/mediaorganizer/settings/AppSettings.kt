@@ -54,7 +54,11 @@ data class AppSettings(
     val autoScrape: Boolean = true,
     // 整理后
     val cleanupMode: CleanupMode = CleanupMode.LEFTOVERS,
+    // 外观
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
 )
+
+enum class ThemeMode(val label: String) { SYSTEM("跟随系统"), LIGHT("浅色"), DARK("深色") }
 
 /**
  * 把设置拍平成 key -> String，存进 DataStore Preferences。
@@ -94,6 +98,7 @@ object SettingsCodec {
         put("player", s.player)
         put("autoScrape", s.autoScrape.toString())
         put("cleanupMode", s.cleanupMode.name)
+        put("themeMode", s.themeMode.name)
         putAll(encodeNaming(s.movieNaming, "movie."))
         putAll(encodeNaming(s.tvNaming, "tv."))
         putAll(encodeScrape(s.scrape, "scrape."))
@@ -133,6 +138,7 @@ object SettingsCodec {
             player = r.str("player", d.player),
             autoScrape = r.bool("autoScrape", d.autoScrape),
             cleanupMode = r.enum("cleanupMode", d.cleanupMode),
+            themeMode = r.enum("themeMode", d.themeMode),
             movieNaming = decodeNaming(m, "movie.", d.movieNaming),
             tvNaming = decodeNaming(m, "tv.", d.tvNaming),
             scrape = decodeScrape(m, "scrape.", d.scrape),
