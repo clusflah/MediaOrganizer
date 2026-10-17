@@ -23,6 +23,11 @@ import com.example.mediaorganizer.metadata.extra.OnlineExtras
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.*
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.settings.LibraryProfile
+import com.example.mediaorganizer.settings.addLibrary
+import com.example.mediaorganizer.settings.allLibraries
+import com.example.mediaorganizer.settings.removeActiveLibrary
+import com.example.mediaorganizer.settings.switchLibrary
 import com.example.mediaorganizer.settings.SettingsRepository
 import com.example.mediaorganizer.storage.CleanupMode
 import com.example.mediaorganizer.storage.CleanupReport
@@ -174,10 +179,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     var progress by mutableStateOf<Pair<Int, Int>?>(null)
         private set
 
-    var connState by mutableStateOf(ConnState.UNTESTED)
-        private set
-    var connMessage by mutableStateOf("")
-        private set
+    /** 连接状态来自保存的最近一次测试结果：重启后还在，切换媒体库时跟着换 */
+    val connState: ConnState get() = when (settings.lastTestOk) {
+        true -> ConnState.OK
+        false -> ConnState.FAIL
+        null -> ConnState.UNTESTED
+    }
+    val connMessage: String get() = settings.lastTestMsg
+
+    private fun recordConn(ok: Boolean, msg: String = "") =
+        updateSettings(settings.copy(lastTestAt = System.currentTimeMillis(), lastTestOk = ok, lastTestMsg = msg))
     var connChecks by mutableStateOf<List<ConnCheck>>(emptyList())
         private set
     var tmdbChecks by mutableStateOf<List<ConnCheck>>(emptyList())
@@ -210,12 +221,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 每次修改立即生效，300ms 防抖后写入 DataStore（输入框打字不会频繁写盘） */
-    fun updateSettings(new: AppSettings) {
+    fun updateSettings(input: AppSettings) {
         val old = settings
-        if (StorageFactory.connectionKey(new) != StorageFactory.connectionKey(old)) {   // 连接信息改了，旧的测试结果作废
+        var new = input
+        if (StorageFactory.connectionKey(new) != StorageFactory.connectionKey(old)) {
             connChecks = emptyList()
-            connState = ConnState.UNTESTED
-            connMessage = ""
+            // 同一个媒体库改了连接信息：旧的测试结果作废；切换媒体库时保留它自己的结果
+            if (new.activeLibrary == old.activeLibrary) new = new.copy(lastTestAt = 0, lastTestOk = null, lastTestMsg = "")
         }
         if (new.tmdbToken != old.tmdbToken || new.tmdbApiBase != old.tmdbApiBase || new.tmdbImageBase != old.tmdbImageBase)
             tmdbChecks = emptyList()
@@ -231,6 +243,33 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             repo.save(new)
             saved = true
         }
+    }
+
+    // ---------- 多个媒体库 ----------
+
+    val libraries: List<LibraryProfile> get() = settings.allLibraries()
+
+    /** 切换后扫描结果属于旧媒体库，清空 */
+    private fun resetForLibrary(new: AppSettings) {
+        if (busy) return
+        updateSettings(new)
+        rows.clear()
+        selected = emptySet()
+        details = null
+        connChecks = emptyList()
+        status = "已切换到「${new.libraryName}」"
+    }
+
+    fun switchLibrary(id: String) { if (id != settings.activeLibrary) resetForLibrary(settings.switchLibrary(id)) }
+
+    fun addLibrary() = resetForLibrary(settings.addLibrary("媒体库 ${libraries.size + 1}"))
+
+    fun renameLibrary(name: String) {
+        if (name.isNotBlank()) updateSettings(settings.copy(libraryName = name.trim()))
+    }
+
+    fun removeLibrary() {
+        if (libraries.size > 1) resetForLibrary(settings.removeActiveLibrary())
     }
 
     private val storageId get() = StorageFactory.id(settings)
@@ -358,13 +397,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             newStorage().also { it.connect() }
         } catch (e: Exception) {
             if (e is CancellationException) throw e
-            connState = ConnState.FAIL
-            connMessage = connErrorText(e)
+            recordConn(false, connErrorText(e))
             status = "连接失败：$connMessage"
             return@launchTask
         }
-        connState = ConnState.OK
-        connMessage = ""
+        recordConn(true)
         val t = newTmdb()
         storage = s; tmdb = t; details = TmdbDetails(t)
         rows.clear()
@@ -775,8 +812,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         fun add(c: ConnCheck) { checks += c; connChecks = checks.toList() }
         fun finish() {
             val firstFail = checks.firstOrNull { it.level == ConnCheck.Level.FAIL }
-            connState = if (firstFail == null) ConnState.OK else ConnState.FAIL
-            connMessage = firstFail?.let { "${it.label}：${it.detail}" } ?: ""
+            recordConn(firstFail == null, firstFail?.let { "${it.label}：${it.detail}" } ?: "")
             val warns = checks.count { it.level == ConnCheck.Level.WARN }
             status = when {
                 firstFail != null -> "连接测试：${checks.count { it.level == ConnCheck.Level.FAIL }} 项失败"

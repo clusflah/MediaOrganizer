@@ -14,6 +14,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowDropDown
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Search
@@ -236,27 +238,87 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
     val s = vm.settings
     fun up(n: AppSettings) = vm.updateSettings(n)
     val host = s.storageType.label + " · " + StorageFactory.describe(s)
-    val configured = StorageFactory.missing(s) == null
+    val missing = StorageFactory.missing(s)
     val (dot, title) = when {
-        !configured -> Gray to "尚未配置媒体库"
+        missing != null -> Gray to "未配置 · $missing"
+        vm.task == Task.TEST -> Orange to "测试中…"
         vm.connState == ConnState.OK -> Green to "已连接 · $host"
-        vm.connState == ConnState.FAIL -> Red to "连接失败 · $host"
+        vm.connState == ConnState.FAIL -> Red to "连接失败 · " + vm.connMessage.ifEmpty { host }
         else -> Gray to "尚未测试 · $host"
     }
+    var menu by remember { mutableStateOf(false) }
+    var renaming by remember { mutableStateOf(false) }
+    var askRemove by remember { mutableStateOf(false) }
 
     ElevatedCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
         Column(Modifier.padding(16.dp)) {
-            Row(Modifier.fillMaxWidth().clickable(onClick = onToggle), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(10.dp).clip(CircleShape).background(dot))
-                Spacer(Modifier.width(10.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("媒体库", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
-                    Text(title, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            // 第一行：媒体库切换 + 测试（不用展开就能点）+ 编辑
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.weight(1f)) {
+                    Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = true }.padding(end = 8.dp)) {
+                        Text("媒体库", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(s.libraryName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false))
+                            Icon(Icons.Default.ArrowDropDown, contentDescription = "切换媒体库")
+                        }
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        vm.libraries.forEach { lib ->
+                            DropdownMenuItem(
+                                leadingIcon = { if (lib.id == s.activeLibrary) Icon(Icons.Default.Check, null) else Spacer(Modifier.size(24.dp)) },
+                                text = {
+                                    Column {
+                                        Text(lib.name)
+                                        Text(
+                                            lib.storageType.label + when (lib.lastTestOk) { true -> " · 已连接"; false -> " · 连接失败"; null -> "" },
+                                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                                        )
+                                    }
+                                },
+                                enabled = !vm.busy,
+                                onClick = { menu = false; vm.switchLibrary(lib.id) },
+                            )
+                        }
+                        HorizontalDivider()
+                        DropdownMenuItem(text = { Text("添加媒体库") }, enabled = !vm.busy,
+                            onClick = { menu = false; vm.addLibrary(); if (!expanded) onToggle() })
+                        DropdownMenuItem(text = { Text("重命名当前媒体库") }, onClick = { menu = false; renaming = true })
+                        if (vm.libraries.size > 1) DropdownMenuItem(
+                            text = { Text("删除当前媒体库", color = Red) }, enabled = !vm.busy,
+                            onClick = { menu = false; askRemove = true },
+                        )
+                    }
+                }
+                OutlinedButton(
+                    onClick = vm::testConnection, enabled = !vm.busy && missing == null,
+                    contentPadding = PaddingValues(horizontal = 14.dp),
+                ) {
+                    if (vm.task == Task.TEST) {
+                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                    }
+                    Text("测试")
                 }
                 TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "编辑") }
             }
-            if (vm.connState == ConnState.FAIL && vm.connMessage.isNotEmpty())
-                Text(vm.connMessage, color = Red, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 4.dp))
+
+            // 状态：服务器、连接状态、最近测试时间；失败时一句话原因
+            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    title, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                    color = if (vm.connState == ConnState.FAIL && missing == null) Red else MaterialTheme.colorScheme.onSurface,
+                )
+            }
+            if (s.lastTestAt > 0 && missing == null) Text(
+                "最近测试 " + formatTime(s.lastTestAt),
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                modifier = Modifier.padding(start = 16.dp),
+            )
+            vm.connChecks.forEach { ConnCheckRow(it) }
+
             if (!expanded) {
                 Spacer(Modifier.height(8.dp))
                 PathLine("扫描", s.scanDir)
@@ -281,21 +343,30 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
                 SettingField("扫描目录", s.scanDir) { up(s.copy(scanDir = it)) }
                 SettingField("电影库目录", s.movieRoot) { up(s.copy(movieRoot = it)) }
                 SettingField("剧集库目录", s.tvRoot) { up(s.copy(tvRoot = it)) }
-                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = vm::testConnection, enabled = !vm.busy && configured) {
-                        if (vm.task == Task.TEST) {
-                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Text("测试连接")
-                    }
-                    Spacer(Modifier.weight(1f))
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onToggle) { Text("完成") }
                 }
-                vm.connChecks.forEach { ConnCheckRow(it) }
             }
         }
     }
+
+    if (renaming) {
+        var name by remember { mutableStateOf(s.libraryName) }
+        AlertDialog(
+            onDismissRequest = { renaming = false },
+            title = { Text("重命名媒体库") },
+            text = { OutlinedTextField(value = name, onValueChange = { name = it }, singleLine = true, label = { Text("名称") }) },
+            confirmButton = { TextButton(onClick = { vm.renameLibrary(name); renaming = false }, enabled = name.isNotBlank()) { Text("保存") } },
+            dismissButton = { TextButton(onClick = { renaming = false }) { Text("取消") } },
+        )
+    }
+    if (askRemove) AlertDialog(
+        onDismissRequest = { askRemove = false },
+        title = { Text("删除「${s.libraryName}」？") },
+        text = { Text("只删除 App 里保存的这个媒体库配置，不会动媒体库里的任何文件。") },
+        confirmButton = { TextButton(onClick = { vm.removeLibrary(); askRemove = false }) { Text("删除", color = Red) } },
+        dismissButton = { TextButton(onClick = { askRemove = false }) { Text("取消") } },
+    )
 }
 
 /** 媒体库类型选择 + 该类型的连接参数 */

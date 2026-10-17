@@ -9,6 +9,13 @@ import com.example.mediaorganizer.storage.StorageType
 
 /** 应用全部设置 */
 data class AppSettings(
+    // 多个媒体库：下面的连接字段是当前媒体库，其余的存在 libraries 里（见 Libraries.kt）
+    val libraries: List<LibraryProfile> = emptyList(),
+    val activeLibrary: String = "default",
+    val libraryName: String = "我的媒体库",
+    val lastTestAt: Long = 0,
+    val lastTestOk: Boolean? = null,
+    val lastTestMsg: String = "",
     // 连接：当前用哪种媒体库，各类型的参数分开保存，切换类型不会丢
     val storageType: StorageType = StorageType.WEBDAV,
     // WebDAV
@@ -57,6 +64,12 @@ data class AppSettings(
 object SettingsCodec {
 
     fun encode(s: AppSettings): Map<String, String> = buildMap {
+        put("libraries", LibraryCodec.encode(s.allLibraries()))
+        put("activeLibrary", s.activeLibrary)
+        put("libraryName", s.libraryName)
+        put("lastTestAt", s.lastTestAt.toString())
+        put("lastTestOk", s.lastTestOk?.toString() ?: "")
+        put("lastTestMsg", s.lastTestMsg)
         put("storageType", s.storageType.name)
         put("webdavUrl", s.webdavUrl)
         put("username", s.username)
@@ -90,6 +103,12 @@ object SettingsCodec {
         val d = AppSettings()
         val r = Reader(m, "")
         return AppSettings(
+            libraries = LibraryCodec.decode(r.str("libraries", "")),
+            activeLibrary = r.str("activeLibrary", d.activeLibrary),
+            libraryName = r.str("libraryName", d.libraryName),
+            lastTestAt = r.str("lastTestAt", "").toLongOrNull() ?: 0,
+            lastTestOk = r.str("lastTestOk", "").toBooleanStrictOrNull(),
+            lastTestMsg = r.str("lastTestMsg", ""),
             storageType = r.enum("storageType", d.storageType),
             webdavUrl = r.str("webdavUrl", d.webdavUrl),
             username = r.str("username", d.username),

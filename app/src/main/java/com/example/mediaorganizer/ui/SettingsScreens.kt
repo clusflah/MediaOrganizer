@@ -12,6 +12,7 @@ import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -414,7 +415,8 @@ fun ScrapeSettingsScreen(
 ) {
     val c = settings.scrape
     fun update(n: ScrapeConfig) = onChange(settings.copy(scrape = n))
-    var editTmdb by remember { mutableStateOf(settings.tmdbToken.isBlank()) }
+    // 默认只展开最需要处理的一组：没配 TMDB 时展开来源，否则展开文件生成
+    var open by rememberSaveable { mutableStateOf(setOf(if (settings.tmdbToken.isBlank()) "source" else "files")) }
     var showToken by remember { mutableStateOf(false) }
     var askReset by remember { mutableStateOf(false) }
     var previewTv by remember { mutableStateOf(true) }
@@ -433,106 +435,79 @@ fun ScrapeSettingsScreen(
             Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            // ---------------- 元数据来源 ----------------
-            Section("元数据来源 · TMDB", trailing = {
-                TextButton(onClick = { editTmdb = !editTmdb }) { Text(if (editTmdb) "收起" else "修改") }
-            }) {
-                val proxied = settings.tmdbApiBase != defaults.tmdbApiBase || settings.tmdbImageBase != defaults.tmdbImageBase
-                Text(
-                    if (settings.tmdbToken.isBlank()) "未填写令牌，无法识别影片" else "令牌已填写" + if (proxied) " · 使用自定义地址" else " · 官方地址",
-                    color = if (settings.tmdbToken.isBlank()) Bad else MaterialTheme.colorScheme.onSurface,
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                if (editTmdb) {
-                    Spacer(Modifier.height(6.dp))
-                    OutlinedTextField(
-                        value = settings.tmdbToken, onValueChange = { onChange(settings.copy(tmdbToken = it)) },
-                        label = { Text("API 读访问令牌（eyJ 开头）") }, singleLine = true,
-                        visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = { TextButton(onClick = { showToken = !showToken }) { Text(if (showToken) "隐藏" else "显示") } },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    SettingField("API 地址（可填反代）", settings.tmdbApiBase) { onChange(settings.copy(tmdbApiBase = it)) }
-                    SettingField("图片地址（可填反代）", settings.tmdbImageBase) { onChange(settings.copy(tmdbImageBase = it)) }
-                    if (proxied) TextButton(onClick = {
-                        onChange(settings.copy(tmdbApiBase = defaults.tmdbApiBase, tmdbImageBase = defaults.tmdbImageBase))
-                    }) { Text("改回官方地址") }
-                }
-                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
-                    OutlinedButton(onClick = onTestTmdb, enabled = !testing && settings.tmdbToken.isNotBlank()) {
-                        if (testing) {
-                            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(8.dp))
-                        }
-                        Text("测试 API 和图片")
-                    }
-                }
-                tmdbChecks.forEach { CheckLine(it) }
-            }
+            val x = c.extra
+            fun upX(n: com.example.mediaorganizer.metadata.extra.ExtraConfig) = update(c.copy(extra = n))
+            fun toggleGroup(id: String) { open = if (id in open) open - id else open + id }
+            val proxied = settings.tmdbApiBase != defaults.tmdbApiBase || settings.tmdbImageBase != defaults.tmdbImageBase
 
-            // ---------------- 补充来源 ----------------
-            Section("补充刮削来源") {
-                val x = c.extra
-                fun upX(n: com.example.mediaorganizer.metadata.extra.ExtraConfig) = update(c.copy(extra = n))
-                Hint("识别影片仍用 TMDB；下面的来源只补充信息，查不到或出错时自动跳过，不影响刮削。")
-                SwitchRow("豆瓣", x.douban, desc = "中文简介、豆瓣评分和豆瓣 ID。非官方接口，有频率限制，大量刮削时会慢一些") {
-                    upX(x.copy(douban = it))
-                }
-                SwitchRow("Bangumi 番组计划", x.bangumi, desc = "只用于动画：中文简介、Bangumi 评分和 ID") { upX(x.copy(bangumi = it)) }
-                if (x.douban || x.bangumi) CheckOption(
-                    "简介和评分优先用豆瓣 / Bangumi", x.preferDouban,
-                    desc = "关闭则用 TMDB 的；无论哪种，各家评分都会写进 NFO",
-                ) { upX(x.copy(preferDouban = it)) }
-                SwitchRow("TheTVDB", x.tvdb, desc = "写入 TVDB ID（无需 key）；填 key 后，TMDB 缺集标题 / 简介时用 TVDB 中文补上") {
-                    upX(x.copy(tvdb = it))
-                }
+            // ================= 1. 元数据来源 =================
+            Group(
+                "元数据来源", expanded = "source" in open, onToggle = { toggleGroup("source") },
+                summary = (if (settings.tmdbToken.isBlank()) "TMDB 未配置" else "TMDB 已配置") +
+                    listOfNotNull(
+                        "豆瓣".takeIf { x.douban }, "Bangumi".takeIf { x.bangumi },
+                        "TheTVDB".takeIf { x.tvdb }, "Fanart.tv".takeIf { x.fanart },
+                    ).takeIf { it.isNotEmpty() }?.joinToString("、", prefix = " · 补充：").orEmpty(),
+                warn = settings.tmdbToken.isBlank(),
+            ) {
+                SubTitle("TMDB（识别影片用）")
+                OutlinedTextField(
+                    value = settings.tmdbToken, onValueChange = { onChange(settings.copy(tmdbToken = it)) },
+                    label = { Text("API 读访问令牌（eyJ 开头）") }, singleLine = true,
+                    visualTransformation = if (showToken) VisualTransformation.None else PasswordVisualTransformation(),
+                    trailingIcon = { TextButton(onClick = { showToken = !showToken }) { Text(if (showToken) "隐藏" else "显示") } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (proxied) Hint("正在使用自定义地址（在「高级」里修改）")
+                TestButton("测试 API 和图片", testing, enabled = settings.tmdbToken.isNotBlank(), onClick = onTestTmdb)
+                tmdbChecks.forEach { CheckLine(it) }
+
+                GroupDivider()
+                SubTitle("补充来源")
+                Hint("只补充信息，查不到或出错时自动跳过。")
+                SwitchRow("豆瓣", x.douban, desc = "中文简介、豆瓣评分。有频率限制，刮削会慢一些") { upX(x.copy(douban = it)) }
+                SwitchRow("Bangumi", x.bangumi, desc = "动画的中文简介和评分") { upX(x.copy(bangumi = it)) }
+                if (x.douban || x.bangumi) CheckOption("简介和评分优先用豆瓣 / Bangumi", x.preferDouban) { upX(x.copy(preferDouban = it)) }
+                SwitchRow("TheTVDB", x.tvdb, desc = "TVDB ID；填 key 后补全缺失的集标题和简介") { upX(x.copy(tvdb = it)) }
                 if (x.tvdb) {
                     SettingField("TheTVDB API key（可选）", x.tvdbApiKey, password = true) { upX(x.copy(tvdbApiKey = it)) }
                     SettingField("订阅 PIN（个人 key 需要）", x.tvdbPin, password = true) { upX(x.copy(tvdbPin = it)) }
                 }
-                SwitchRow("Fanart.tv", x.fanart, desc = "高清 logo、clearart、横幅、横版海报、光盘图（Infuse / Emby / Kodi 模板）") {
-                    upX(x.copy(fanart = it))
-                }
+                SwitchRow("Fanart.tv", x.fanart, desc = "高清 logo、clearart、横幅、光盘图") { upX(x.copy(fanart = it)) }
                 if (x.fanart) {
                     SettingField("Fanart.tv API key（免费申请）", x.fanartApiKey, password = true) { upX(x.copy(fanartApiKey = it)) }
                     if (x.fanartApiKey.isBlank()) Text("未填写 key 时不会下载 Fanart.tv 图片", color = Warn, style = MaterialTheme.typography.bodySmall)
                 }
-                if (x.douban || x.bangumi || x.tvdb || x.fanart) OutlinedButton(
-                    onClick = onTestSources, enabled = !testing, modifier = Modifier.padding(top = 6.dp),
-                ) {
-                    if (testing) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(8.dp))
-                    }
-                    Text("测试已开启的来源")
-                }
+                if (x.douban || x.bangumi || x.tvdb || x.fanart) TestButton("测试已开启的来源", testing, onClick = onTestSources)
                 sourceChecks.forEach { CheckLine(it) }
             }
 
-            // ---------------- 播放器兼容 ----------------
-            Section("播放器兼容模板") {
-                Hint("决定海报、背景图等用什么文件名。选一个主要用的；多选可同时兼容多个播放器，但同一张图会存多份。")
+            // ================= 2. 文件生成 =================
+            Group(
+                "文件生成", expanded = "files" in open, onToggle = { toggleGroup("files") },
+                summary = c.templates.joinToString(" + ") { templateName(it) } +
+                    (if (c.nfo) " · NFO" else " · 无 NFO") +
+                    " · " + listOfNotNull("海报".takeIf { c.poster }, "背景".takeIf { c.fanart }, "Logo".takeIf { c.logo },
+                        "季海报".takeIf { c.seasonPoster }, "缩略图".takeIf { c.episodeThumb }).ifEmpty { listOf("无图片") }.joinToString("、"),
+            ) {
+                SubTitle("播放器兼容模板")
+                Hint("决定图片用什么文件名；多选会让同一张图存多份。")
                 fun toggle(t: ScrapeTemplate, on: Boolean) =
                     update(c.copy(templates = (if (on) c.templates + t else c.templates - t).ifEmpty { setOf(t) }))
-                CheckOption("Infuse / VidHub", ScrapeTemplate.INFUSE in c.templates,
-                    desc = "poster.jpg、fanart.jpg，另加 folder.jpg 让文件夹直接显示封面") { toggle(ScrapeTemplate.INFUSE, it) }
-                CheckOption("Emby / Jellyfin / Kodi", ScrapeTemplate.KODI_EMBY in c.templates,
-                    desc = "poster.jpg、fanart.jpg、seasonXX-poster.jpg 等社区标准命名") { toggle(ScrapeTemplate.KODI_EMBY, it) }
-                CheckOption("Plex / 老播放器", ScrapeTemplate.PLEX in c.templates,
-                    desc = "图片与视频同名（视频名.jpg），老播放器也能认出海报") { toggle(ScrapeTemplate.PLEX, it) }
-            }
+                CheckOption("Infuse / VidHub", ScrapeTemplate.INFUSE in c.templates, desc = "额外生成 folder.jpg 作文件夹封面") {
+                    toggle(ScrapeTemplate.INFUSE, it)
+                }
+                CheckOption("Emby / Jellyfin / Kodi", ScrapeTemplate.KODI_EMBY in c.templates) { toggle(ScrapeTemplate.KODI_EMBY, it) }
+                CheckOption("Plex / 老播放器", ScrapeTemplate.PLEX in c.templates, desc = "图片与视频同名") { toggle(ScrapeTemplate.PLEX, it) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp, bottom = 6.dp)) {
+                    FilterChip(selected = previewTv, onClick = { previewTv = true }, label = { Text("剧集示例") })
+                    FilterChip(selected = !previewTv, onClick = { previewTv = false }, label = { Text("电影示例") })
+                }
+                LivePreview(settings, previewTv, showFiles = true)
 
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                FilterChip(selected = previewTv, onClick = { previewTv = true }, label = { Text("剧集示例") })
-                FilterChip(selected = !previewTv, onClick = { previewTv = false }, label = { Text("电影示例") })
-            }
-            LivePreview(settings, previewTv, showFiles = true)
-
-            // ---------------- 文件生成 ----------------
-            Section("NFO 信息文件", trailing = { Switch(c.nfo, { update(c.copy(nfo = it)) }) }) {
-                if (!c.nfo) Off("关闭：不写 NFO，播放器只能自己联网识别")
-                else {
-                    Hint("包含简介、类型、评分等，媒体服务器可直接读取，不必再联网刮削。")
+                GroupDivider()
+                SwitchRow("NFO 信息文件", c.nfo) { update(c.copy(nfo = it)) }
+                if (c.nfo) {
                     SubTitle("演职人员")
                     OptionGrid(
                         options = listOf(0, 10, 20, 30),
@@ -540,44 +515,60 @@ fun ScrapeSettingsScreen(
                         label = { if (it == 0) "不写入" else "前 $it 位" },
                         recommended = 20,
                     ) { n -> update(if (n == 0) c.copy(cast = false) else c.copy(cast = true, maxActors = n)) }
-                    Hint("写入越多 NFO 越大；演员信息已包含在详情请求里，不会增加网络请求次数。")
                 }
-            }
 
-            Section("图片") {
+                GroupDivider()
+                SubTitle("图片")
                 CheckOption("海报", c.poster) { update(c.copy(poster = it)) }
                 CheckOption("背景图", c.fanart) { update(c.copy(fanart = it)) }
-                CheckOption("Logo", c.logo, desc = "每部作品多一次请求") { update(c.copy(logo = it)) }
+                CheckOption("Logo", c.logo) { update(c.copy(logo = it)) }
                 CheckOption("季海报", c.seasonPoster) { update(c.copy(seasonPoster = it)) }
-                CheckOption("单集缩略图", c.episodeThumb, desc = "每集一张，剧集多时文件数量最多") { update(c.copy(episodeThumb = it)) }
-                SubTitle("图片质量")
-                OptionGrid(
-                    options = ImageQuality.entries,
-                    selected = c.quality,
-                    label = { when (it) { ImageQuality.ORIGINAL -> "原图"; ImageQuality.HIGH -> "高清"; ImageQuality.STANDARD -> "标准" } },
-                ) { update(c.copy(quality = it)) }
-                Hint("具体文件名随上方模板变化，见预览的「生成文件」。")
+                CheckOption("单集缩略图", c.episodeThumb, desc = "每集一张，文件数量最多") { update(c.copy(episodeThumb = it)) }
             }
 
-            // ---------------- 执行策略 ----------------
-            Section("执行策略") {
+            // ================= 3. 执行策略 =================
+            Group(
+                "执行策略", expanded = "run" in open, onToggle = { toggleGroup("run") },
+                summary = (if (settings.autoScrape) "整理后自动刮削" else "手动刮削") + " · " + when (c.strategy) {
+                    ScrapeStrategy.ONLY_MISSING -> "只补缺少的"
+                    ScrapeStrategy.UPDATE_NFO -> "更新 NFO，保留图片"
+                    ScrapeStrategy.OVERWRITE -> "全部重新生成"
+                },
+            ) {
                 SwitchRow(
                     "整理后自动刮削", settings.autoScrape,
-                    desc = if (settings.autoScrape) "整理完立即为成功的文件刮削"
-                    else "只整理文件；需要时在主界面右上角菜单「刮削已整理的文件」",
+                    desc = if (settings.autoScrape) null else "需要时在主界面菜单「刮削已整理的文件」",
                 ) { onChange(settings.copy(autoScrape = it)) }
                 SubTitle("目标位置已有同名文件时")
-                RadioOption("只补缺少的", c.strategy == ScrapeStrategy.ONLY_MISSING,
-                    desc = "已有的 NFO 和图片全部保留，最省流量") { update(c.copy(strategy = ScrapeStrategy.ONLY_MISSING)) }
-                RadioOption("更新 NFO，保留图片", c.strategy == ScrapeStrategy.UPDATE_NFO, recommended = true,
-                    desc = "重写 NFO 拿到最新信息；已有的海报等图片不动，保留你自己换过的图") {
-                    update(c.copy(strategy = ScrapeStrategy.UPDATE_NFO))
+                RadioOption("只补缺少的", c.strategy == ScrapeStrategy.ONLY_MISSING, desc = "已有的 NFO 和图片全部保留") {
+                    update(c.copy(strategy = ScrapeStrategy.ONLY_MISSING))
                 }
-                RadioOption("全部重新生成", c.strategy == ScrapeStrategy.OVERWRITE,
-                    desc = "已有的 NFO 和图片都会被替换") { update(c.copy(strategy = ScrapeStrategy.OVERWRITE)) }
-                Hint("自动和手动刮削都按这里的策略。撤销时只删除本次新建的文件，被替换的旧文件无法找回。")
+                RadioOption("更新 NFO，保留图片", c.strategy == ScrapeStrategy.UPDATE_NFO, recommended = true,
+                    desc = "重写 NFO；已有的图片不动，保留你自己换过的图") { update(c.copy(strategy = ScrapeStrategy.UPDATE_NFO)) }
+                RadioOption("全部重新生成", c.strategy == ScrapeStrategy.OVERWRITE, desc = "已有的 NFO 和图片都会被替换") {
+                    update(c.copy(strategy = ScrapeStrategy.OVERWRITE))
+                }
+                Hint("单项刮削总是全部重新生成。被替换的旧文件无法通过撤销找回。")
             }
-            Spacer(Modifier.height(8.dp))
+
+            // ================= 4. 高级 =================
+            Group(
+                "高级", expanded = "adv" in open, onToggle = { toggleGroup("adv") },
+                summary = (if (proxied) "自定义 TMDB 地址" else "TMDB 官方地址") + " · 图片" + qualityName(c.quality),
+            ) {
+                SubTitle("TMDB 地址（国内访问不畅时填反代）")
+                SettingField("API 地址", settings.tmdbApiBase) { onChange(settings.copy(tmdbApiBase = it)) }
+                SettingField("图片地址", settings.tmdbImageBase) { onChange(settings.copy(tmdbImageBase = it)) }
+                if (proxied) TextButton(onClick = {
+                    onChange(settings.copy(tmdbApiBase = defaults.tmdbApiBase, tmdbImageBase = defaults.tmdbImageBase))
+                }) { Text("改回官方地址") }
+                GroupDivider()
+                SubTitle("图片质量")
+                OptionGrid(options = ImageQuality.entries, selected = c.quality, label = { qualityName(it) }) {
+                    update(c.copy(quality = it))
+                }
+            }
+            Spacer(Modifier.height(24.dp))
         }
     }
 
@@ -604,8 +595,8 @@ fun ScrapeSettingsScreen(
 /** 设置页底栏：保存状态 + 恢复默认 + 完成 */
 @Composable
 private fun SettingsBottomBar(saved: Boolean, onReset: () -> Unit, onDone: () -> Unit) {
-    Surface(tonalElevation = 3.dp) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Surface(tonalElevation = 1.dp, shadowElevation = 2.dp) {
+        Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp)) {
             Text(
                 if (saved) "✓ 修改已自动保存" else "保存中…",
                 style = MaterialTheme.typography.labelSmall,
@@ -634,20 +625,67 @@ private fun CheckLine(c: ConnCheck) {
     }
 }
 
+/** 普通设置卡片：标题不加强调色条（色条只留给主要分组） */
 @Composable
 fun Section(title: String, trailing: (@Composable () -> Unit)? = null, content: @Composable ColumnScope.() -> Unit) {
     Surface(shape = RoundedCornerShape(12.dp), tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
             Row(Modifier.heightIn(min = 32.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(width = 3.dp, height = 14.dp).background(Accent, RoundedCornerShape(2.dp)))
-                Spacer(Modifier.width(8.dp))
-                Text(title, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+                Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
                 trailing?.invoke()
             }
             content()
         }
     }
 }
+
+/** 主要分组：可折叠，收起时一行摘要；只有它带橙色短条 */
+@Composable
+private fun Group(
+    title: String, expanded: Boolean, onToggle: () -> Unit, summary: String, warn: Boolean = false,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Surface(shape = RoundedCornerShape(12.dp), tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
+        Column {
+            Row(
+                Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Box(Modifier.size(width = 3.dp, height = 12.dp).background(Accent, RoundedCornerShape(2.dp)))
+                Spacer(Modifier.width(8.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                    if (!expanded) Text(summary, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        color = if (warn) Bad else MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, contentDescription = if (expanded) "收起" else "展开")
+            }
+            if (expanded) Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 14.dp)) { content() }
+        }
+    }
+}
+
+@Composable
+private fun GroupDivider() = HorizontalDivider(Modifier.padding(vertical = 10.dp), color = MaterialTheme.colorScheme.outlineVariant)
+
+@Composable
+private fun TestButton(label: String, testing: Boolean, enabled: Boolean = true, onClick: () -> Unit) {
+    OutlinedButton(onClick = onClick, enabled = enabled && !testing, modifier = Modifier.padding(top = 6.dp)) {
+        if (testing) {
+            CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
+            Spacer(Modifier.width(8.dp))
+        }
+        Text(label)
+    }
+}
+
+private fun templateName(t: ScrapeTemplate) = when (t) {
+    ScrapeTemplate.INFUSE -> "Infuse"
+    ScrapeTemplate.KODI_EMBY -> "Emby/Kodi"
+    ScrapeTemplate.PLEX -> "Plex"
+}
+
+private fun qualityName(q: ImageQuality) = when (q) { ImageQuality.ORIGINAL -> "原图"; ImageQuality.HIGH -> "高清"; ImageQuality.STANDARD -> "标准" }
 
 /** 开关关闭时的说明，淡显 */
 @Composable
@@ -676,8 +714,8 @@ private fun RecommendBadge() {
 
 @Composable
 private fun RadioOption(label: String, selected: Boolean, recommended: Boolean = false, desc: String? = null, onClick: () -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
-        RadioButton(selected = selected, onClick = null, modifier = Modifier.padding(top = 2.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clickable(onClick = onClick).padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        RadioButton(selected = selected, onClick = null)
         Spacer(Modifier.width(8.dp))
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -691,8 +729,8 @@ private fun RadioOption(label: String, selected: Boolean, recommended: Boolean =
 
 @Composable
 private fun CheckOption(label: String, checked: Boolean, desc: String? = null, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 4.dp), verticalAlignment = Alignment.Top) {
-        Checkbox(checked = checked, onCheckedChange = null, modifier = Modifier.padding(top = 2.dp))
+    Row(Modifier.fillMaxWidth().heightIn(min = 40.dp).clickable { onChange(!checked) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
+        Checkbox(checked = checked, onCheckedChange = null)
         Spacer(Modifier.width(8.dp))
         Column {
             Text(label)
@@ -703,7 +741,7 @@ private fun CheckOption(label: String, checked: Boolean, desc: String? = null, o
 
 @Composable
 private fun SwitchRow(label: String, checked: Boolean, desc: String? = null, onChange: (Boolean) -> Unit) {
-    Row(Modifier.fillMaxWidth().clickable { onChange(!checked) }.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 44.dp).clickable { onChange(!checked) }.padding(vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(label)
             desc?.let { Hint(it) }
@@ -725,7 +763,7 @@ private fun <T> OptionGrid(
         Row(Modifier.fillMaxWidth()) {
             pair.forEach { opt ->
                 Row(
-                    Modifier.weight(1f).clickable { onSelect(opt) }.padding(vertical = 6.dp),
+                    Modifier.weight(1f).heightIn(min = 40.dp).clickable { onSelect(opt) }.padding(vertical = 2.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     RadioButton(selected = opt == selected, onClick = null)
