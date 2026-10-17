@@ -28,6 +28,7 @@ data class AppSettings(
     val aliClientId: String = "",
     val aliClientSecret: String = "",
     val aliRefreshToken: String = "",
+    val aliResourceDrive: Boolean = true,     // true 资源库，false 备份盘
     // TMDB
     val tmdbToken: String = "",
     val tmdbApiBase: String = "https://api.themoviedb.org/3",
@@ -69,6 +70,7 @@ object SettingsCodec {
         put("aliClientId", s.aliClientId)
         put("aliClientSecret", s.aliClientSecret)
         put("aliRefreshToken", s.aliRefreshToken)
+        put("aliResourceDrive", s.aliResourceDrive.toString())
         put("tmdbToken", s.tmdbToken)
         put("tmdbApiBase", s.tmdbApiBase)
         put("tmdbImageBase", s.tmdbImageBase)
@@ -101,6 +103,7 @@ object SettingsCodec {
             aliClientId = r.str("aliClientId", d.aliClientId),
             aliClientSecret = r.str("aliClientSecret", d.aliClientSecret),
             aliRefreshToken = r.str("aliRefreshToken", d.aliRefreshToken),
+            aliResourceDrive = r.bool("aliResourceDrive", d.aliResourceDrive),
             tmdbToken = r.str("tmdbToken", d.tmdbToken),
             tmdbApiBase = r.str("tmdbApiBase", d.tmdbApiBase),
             tmdbImageBase = r.str("tmdbImageBase", d.tmdbImageBase),

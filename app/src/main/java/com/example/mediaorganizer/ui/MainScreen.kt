@@ -22,7 +22,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -144,6 +146,11 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
 
     detailKey?.let { key -> vm.rows.firstOrNull { it.key == key } }?.let { row ->
         RowDetailDialog(vm, row, onDismiss = { detailKey = null })
+    }
+    vm.qr?.let { q ->
+        QrLoginDialog(q, onCancel = vm::cancelQr, onRetry = {
+            if (vm.settings.storageType == StorageType.PAN115) vm.login115() else vm.loginAliyun()
+        })
     }
     vm.leftovers?.let { found ->
         LeftoversDialog(found, vm.settings.cleanupMode, onDelete = vm::deleteLeftovers, onDismiss = vm::dismissLeftovers)
@@ -267,7 +274,7 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
             }
             if (expanded) {
                 Spacer(Modifier.height(8.dp))
-                StorageFields(s, ::up)
+                StorageFields(vm, s, ::up)
                 Text(
                     "下面的目录都是这个媒体库里的路径" + if (s.storageType == StorageType.LOCAL) "（相对所选文件夹，/ 就是它本身）" else "",
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
@@ -296,7 +303,7 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
 /** 媒体库类型选择 + 该类型的连接参数 */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
-private fun StorageFields(s: AppSettings, up: (AppSettings) -> Unit) {
+private fun StorageFields(vm: MainViewModel, s: AppSettings, up: (AppSettings) -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     val pickTree = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.OpenDocumentTree(),
@@ -345,9 +352,85 @@ private fun StorageFields(s: AppSettings, up: (AppSettings) -> Unit) {
             Text("可选手机里的文件夹，或插着的 U 盘 / 移动硬盘。选包含下载和影视库的上层文件夹。",
                 style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
         }
-        else -> {}
+        StorageType.PAN115 -> {
+            Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(top = 6.dp)) {
+                Text(if (s.pan115Cookie.isBlank()) "未登录" else "已登录", modifier = Modifier.weight(1f))
+                if (s.pan115Cookie.isNotBlank()) TextButton(onClick = { up(s.copy(pan115Cookie = "")) }) { Text("退出") }
+                OutlinedButton(onClick = vm::login115) { Text(if (s.pan115Cookie.isBlank()) "扫码登录" else "重新登录") }
+            }
+            Text("非官方接口，115 改版后可能需要更新 App。删除的文件会进 115 回收站。",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
+        StorageType.ALIYUN -> {
+            SettingField("开放平台 AppID", s.aliClientId) { up(s.copy(aliClientId = it)) }
+            SettingField("开放平台 App Secret", s.aliClientSecret, password = true) { up(s.copy(aliClientSecret = it)) }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 4.dp)) {
+                FilterChip(selected = s.aliResourceDrive, onClick = { up(s.copy(aliResourceDrive = true)) }, label = { Text("资源库") })
+                FilterChip(selected = !s.aliResourceDrive, onClick = { up(s.copy(aliResourceDrive = false)) }, label = { Text("备份盘") })
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(if (s.aliRefreshToken.isBlank()) "未授权" else "已授权", modifier = Modifier.weight(1f))
+                if (s.aliRefreshToken.isNotBlank()) TextButton(onClick = { up(s.copy(aliRefreshToken = "")) }) { Text("取消授权") }
+                OutlinedButton(
+                    onClick = vm::loginAliyun,
+                    enabled = s.aliClientId.isNotBlank() && s.aliClientSecret.isNotBlank(),
+                ) { Text(if (s.aliRefreshToken.isBlank()) "扫码授权" else "重新授权") }
+            }
+            Text("需要先在阿里云盘开放平台（www.alipan.com/developer）创建应用，拿到 AppID 和 Secret。删除的文件会进回收站。",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline)
+        }
     }
 }
+
+/** 网盘扫码登录：显示二维码，可保存到相册给同一台手机上的 App 识别 */
+@Composable
+private fun QrLoginDialog(qr: MainViewModel.QrLogin, onCancel: () -> Unit, onRetry: () -> Unit) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val bitmap = remember(qr.image) {
+        qr.image?.let { android.graphics.BitmapFactory.decodeByteArray(it, 0, it.size)?.asImageBitmap() }
+    }
+    var saved by remember(qr.image) { mutableStateOf<String?>(null) }
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text(qr.title) },
+        text = {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                if (bitmap != null) androidx.compose.foundation.Image(
+                    bitmap, contentDescription = "登录二维码",
+                    modifier = Modifier.size(220.dp).alpha(if (qr.failed) 0.25f else 1f),
+                ) else if (!qr.failed) CircularProgressIndicator(Modifier.padding(32.dp))
+                Text(qr.hint, style = MaterialTheme.typography.bodySmall, textAlign = TextAlign.Center,
+                    color = if (qr.failed) Red else MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp))
+                saved?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = Green) }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                    if (qr.image != null && !qr.failed && android.os.Build.VERSION.SDK_INT >= 29) OutlinedButton(onClick = {
+                        saved = if (saveToGallery(context, qr.image)) "已保存到相册「影视整理」" else "保存失败"
+                    }) { Text("保存到相册") }
+                    if (qr.openUrl != null && !qr.failed) OutlinedButton(onClick = {
+                        runCatching {
+                            context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(qr.openUrl)))
+                        }
+                    }) { Text("在本机打开") }
+                }
+            }
+        },
+        confirmButton = {
+            if (qr.failed) Button(onClick = onRetry) { Text("重新获取") } else TextButton(onClick = onCancel) { Text("取消") }
+        },
+        dismissButton = { if (qr.failed) TextButton(onClick = onCancel) { Text("关闭") } },
+    )
+}
+
+private fun saveToGallery(context: android.content.Context, png: ByteArray): Boolean = runCatching {
+    val values = android.content.ContentValues().apply {
+        put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, "login-qr-${System.currentTimeMillis()}.png")
+        put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png")
+        put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, "Pictures/影视整理")
+    }
+    val uri = context.contentResolver.insert(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)!!
+    context.contentResolver.openOutputStream(uri)!!.use { it.write(png) }
+    true
+}.getOrDefault(false)
 
 @Composable
 private fun PathLine(label: String, path: String) {

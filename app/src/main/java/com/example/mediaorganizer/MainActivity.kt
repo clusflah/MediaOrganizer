@@ -34,6 +34,9 @@ import com.example.mediaorganizer.storage.StorageException
 import com.example.mediaorganizer.storage.StorageFactory
 import com.example.mediaorganizer.storage.StorageProvider
 import com.example.mediaorganizer.storage.StorageType
+import com.example.mediaorganizer.storage.aliyun.AliyunLogin
+import com.example.mediaorganizer.storage.pan115.Pan115Client
+import com.example.mediaorganizer.storage.pan115.Pan115Login
 import com.example.mediaorganizer.storage.normalizePath
 import com.example.mediaorganizer.storage.parentPath
 import com.example.mediaorganizer.ui.MainScreen
@@ -225,7 +228,91 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val storageId get() = StorageFactory.id(settings)
 
-    private fun newStorage(): StorageProvider = StorageFactory.create(getApplication(), settings)
+    private fun newStorage(): StorageProvider = StorageFactory.create(getApplication(), settings) { token ->
+        // 阿里云盘每次刷新都会换 refresh_token，不存下来下次启动就失效
+        viewModelScope.launch { updateSettings(settings.copy(aliRefreshToken = token)) }
+    }
+
+    // ---------- 网盘扫码登录 ----------
+
+    /** 正在显示的登录二维码，null = 没在登录 */
+    data class QrLogin(
+        val title: String,
+        val image: ByteArray?,
+        val hint: String,
+        val openUrl: String? = null,     // 同一台手机上可尝试直接用 App 打开
+        val failed: Boolean = false,
+    )
+
+    var qr by mutableStateOf<QrLogin?>(null)
+        private set
+    private var qrJob: Job? = null
+
+    fun cancelQr() { qrJob?.cancel(); qr = null }
+
+    fun login115() {
+        qrJob?.cancel()
+        qrJob = viewModelScope.launch {
+            val login = Pan115Login()
+            try {
+                qr = QrLogin("115 扫码登录", null, "正在获取二维码…")
+                val s = login.start()
+                qr = QrLogin("115 扫码登录", login.qrImage(s), "用 115 App 扫一扫；在这台手机上可以先保存图片，再从相册识别", s.qrContent)
+                while (true) {
+                    when (login.status(s)) {
+                        Pan115Login.Status.WAITING -> {}
+                        Pan115Login.Status.SCANNED -> qr = qr?.copy(hint = "已扫码，请在 115 App 里点「确认登录」")
+                        Pan115Login.Status.CONFIRMED -> {
+                            val cookie = login.finish(s)
+                            updateSettings(settings.copy(pan115Cookie = cookie))
+                            qr = null
+                            status = "115 登录成功：" + runCatching { Pan115Client(cookie).userName() }.getOrDefault("")
+                            return@launch
+                        }
+                        Pan115Login.Status.EXPIRED -> { qr = qr?.copy(hint = "二维码已过期", failed = true); return@launch }
+                        Pan115Login.Status.CANCELED -> { qr = qr?.copy(hint = "已在 115 App 里取消", failed = true); return@launch }
+                    }
+                    delay(1500)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                qr = (qr ?: QrLogin("115 扫码登录", null, "")).copy(hint = "出错：${e.message}", failed = true)
+            }
+        }
+    }
+
+    fun loginAliyun() {
+        val st = settings
+        qrJob?.cancel()
+        qrJob = viewModelScope.launch {
+            val login = AliyunLogin(st.aliClientId.trim(), st.aliClientSecret.trim())
+            try {
+                qr = QrLogin("阿里云盘扫码授权", null, "正在获取二维码…")
+                val s = login.start()
+                qr = QrLogin("阿里云盘扫码授权", login.qrImage(s), "用阿里云盘 App 扫一扫并同意授权；在这台手机上可以先保存图片，再从相册识别")
+                while (true) {
+                    val (state, code) = login.status(s)
+                    when (state) {
+                        AliyunLogin.Status.WAITING -> {}
+                        AliyunLogin.Status.SCANNED -> qr = qr?.copy(hint = "已扫码，请在阿里云盘 App 里同意授权")
+                        AliyunLogin.Status.CONFIRMED -> {
+                            updateSettings(settings.copy(aliRefreshToken = login.finish(code!!)))
+                            qr = null
+                            status = "阿里云盘授权成功"
+                            return@launch
+                        }
+                        AliyunLogin.Status.EXPIRED -> { qr = qr?.copy(hint = "二维码已过期", failed = true); return@launch }
+                    }
+                    delay(2000)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                qr = (qr ?: QrLogin("阿里云盘扫码授权", null, "")).copy(hint = "出错：${e.message}", failed = true)
+            }
+        }
+    }
 
     private fun newTmdb() = settings.let {
         TmdbClient(it.tmdbToken.trim(), apiBase = it.tmdbApiBase.trimEnd('/'), imageBase = it.tmdbImageBase.trimEnd('/'))
