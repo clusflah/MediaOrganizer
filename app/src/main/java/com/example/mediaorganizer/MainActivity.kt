@@ -756,6 +756,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     data class TargetInfo(
         val dir: String, val existing: RemoteFile?, val videos: List<RemoteFile>, val dirMissing: Boolean,
         val related: List<RemoteFile> = videos,
+        val dupEpisodes: List<List<RemoteFile>> = emptyList(),   // 剧集：同剧其他集的重复版本
     )
 
     /** 不占用 busy，详情弹窗打开时直接查 */
@@ -769,10 +770,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         } catch (e: StorageException) {
             if (e.code == 404) return TargetInfo(dir, null, emptyList(), dirMissing = true) else throw e
         }
-        val videos = list.filter { !it.isDirectory && it.name.substringAfterLast('.', "").lowercase() in MediaNameParser.VIDEO_EXTENSIONS }
+        fun videosOf(l: List<RemoteFile>) = l.filter { !it.isDirectory && it.name.substringAfterLast('.', "").lowercase() in MediaNameParser.VIDEO_EXTENSIONS }
+        val videos = videosOf(list)
+        // 剧集：再看看剧集根文件夹和各季文件夹，找出别的集的重复版本
+        val showVideos = if (!plan.input.isEpisode) emptyList() else {
+            val show = normalizePath(plan.showDir)
+            val showList = if (show == dir) list else runCatching { s.list(show) }.getOrDefault(emptyList())
+            videos + videosOf(showList) + showList.filter { it.isDirectory && normalizePath(it.path) != dir }
+                .flatMap { d -> videosOf(runCatching { s.list(d.path) }.getOrDefault(emptyList())) }
+        }
         return TargetInfo(
             dir, list.firstOrNull { !it.isDirectory && it.name == plan.targetName }, videos, dirMissing = false,
             related = Precheck.sameItem(videos, plan.input),
+            dupEpisodes = Precheck.duplicateEpisodes(showVideos, plan.input),
         )
     }
 
@@ -781,6 +791,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val s = storage ?: return@launchTask
         s.delete(file)
         status = "已删除 ${file.name}"
+        onDone()
+    }
+
+    /** 批量删除影视库里的文件（同剧其他集的重复版本） */
+    fun deleteRemoteAll(files: List<RemoteFile>, onDone: () -> Unit = {}) = launchTask(Task.ORGANIZE) {
+        val s = storage ?: return@launchTask
+        val errors = mutableListOf<String>()
+        files.forEachIndexed { i, f ->
+            status = "删除中 ${i + 1}/${files.size}"
+            try { s.delete(f) } catch (e: StorageException) { errors += "${f.name}：${e.message}" }
+            if (s.minRequestIntervalMs > 0) delay(s.minRequestIntervalMs)
+        }
+        status = "已删除 ${files.size - errors.size} 个文件" + if (errors.isNotEmpty()) "，${errors.size} 个失败（${errors.first()}）" else ""
         onDone()
     }
 

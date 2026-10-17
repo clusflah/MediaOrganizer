@@ -41,6 +41,8 @@ import com.example.mediaorganizer.naming.ConflictAction
 import com.example.mediaorganizer.naming.ConflictKind
 import com.example.mediaorganizer.metadata.MediaType
 import com.example.mediaorganizer.metadata.TmdbSearchResult
+import com.example.mediaorganizer.parser.MediaNameParser
+import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.settings.ThemeMode
 import com.example.mediaorganizer.storage.CleanupMode
@@ -1242,6 +1244,12 @@ private fun TargetComparePanel(vm: MainViewModel, row: MediaRow, onClose: () -> 
         }
     }
 
+    // 同剧其他集的重复版本：和本文件无关，单独一块，避免和上面的对比混在一起
+    val dups = info?.dupEpisodes.orEmpty()
+    if (dups.isNotEmpty()) DuplicateEpisodesPanel(dups, enabled = !vm.busy) { picked ->
+        confirm = "删除选中的 ${picked.size} 个文件？$gone" to { vm.deleteRemoteAll(picked) { reload++ } }
+    }
+
     confirm?.let { (msg, action) ->
         AlertDialog(
             onDismissRequest = { confirm = null },
@@ -1250,6 +1258,54 @@ private fun TargetComparePanel(vm: MainViewModel, row: MediaRow, onClose: () -> 
             confirmButton = { TextButton(onClick = { confirm = null; action() }) { Text("删除", color = Red) } },
             dismissButton = { TextButton(onClick = { confirm = null }) { Text("取消") } },
         )
+    }
+}
+
+/** 同剧其他集里有多个版本的，按集分组，勾选后批量删除 */
+@Composable
+private fun DuplicateEpisodesPanel(groups: List<List<RemoteFile>>, enabled: Boolean, onDelete: (List<RemoteFile>) -> Unit) {
+    var picked by remember(groups) { mutableStateOf(emptySet<String>()) }
+    Surface(shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = Modifier.fillMaxWidth().padding(top = 10.dp)) {
+        Column(Modifier.padding(12.dp)) {
+            Text("同剧其他集的重复版本", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleSmall)
+            Text("和本文件无关，只是顺便发现的：${groups.size} 集各有多个文件", style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            groups.forEach { files ->
+                val p = MediaNameParser.parse(files.first().name)
+                Text("S%02dE%02d · %d 个版本".format(p.season ?: 1, p.episode ?: 0, files.size),
+                    style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(top = 8.dp))
+                files.forEach { f ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable(enabled = enabled) { picked = if (f.path in picked) picked - f.path else picked + f.path },
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(checked = f.path in picked, onCheckedChange = null, enabled = enabled, modifier = Modifier.padding(end = 8.dp))
+                        Column(Modifier.weight(1f).padding(vertical = 4.dp)) {
+                            Text(f.name, style = MaterialTheme.typography.bodySmall, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            Text(
+                                listOf(sizeText(f.size), if (f.modified > 0) "修改于 " + formatTime(f.modified) else "")
+                                    .filter { it.isNotEmpty() }.joinToString(" · "),
+                                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                            )
+                        }
+                    }
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.padding(top = 8.dp)) {
+                // 快捷勾选：每集保留最大的那个，其余勾上
+                TextButton(onClick = {
+                    picked = groups.flatMap { files -> files.sortedByDescending { it.size }.drop(1) }.map { it.path }.toSet()
+                }, enabled = enabled) { Text("每集只留最大的") }
+                val chosen = groups.flatten().filter { it.path in picked }
+                Button(
+                    onClick = { onDelete(chosen) }, enabled = enabled && chosen.isNotEmpty(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError,
+                    ),
+                ) { Text("删除选中 ${chosen.size} 个") }
+            }
+        }
     }
 }
 
