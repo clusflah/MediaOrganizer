@@ -8,8 +8,9 @@
         android:allowBackup="true"
         android:label="影视整理"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:usesCleartextTraffic="true"
-        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        android:theme="@style/Theme.MediaOrganizer">
         <activity
             android:name=".MainActivity"
             android:exported="true"

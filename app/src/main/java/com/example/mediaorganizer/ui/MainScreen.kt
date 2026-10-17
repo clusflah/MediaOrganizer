@@ -42,6 +42,7 @@ import com.example.mediaorganizer.naming.ConflictKind
 import com.example.mediaorganizer.metadata.MediaType
 import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.settings.ThemeMode
 import com.example.mediaorganizer.storage.CleanupMode
 import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.StorageFactory
@@ -50,10 +51,10 @@ import com.example.mediaorganizer.storage.normalizePath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-private val Green = Color(0xFF2E7D32)
-private val Orange = Color(0xFFEF6C00)
-private val Red = Color(0xFFC62828)
-private val Gray = Color(0xFF757575)
+private val Green: Color @Composable get() = LocalStatusColors.current.ok
+private val Orange: Color @Composable get() = LocalStatusColors.current.warn
+private val Red: Color @Composable get() = LocalStatusColors.current.bad
+private val Gray: Color @Composable get() = LocalStatusColors.current.muted
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -209,6 +210,12 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
         HorizontalDivider()
         DropdownMenuItem(text = { Text("命名规则") }, onClick = { go(openNaming) })
         DropdownMenuItem(text = { Text("刮削设置") }, onClick = { go(openScrape) })
+        // 点一下切换到下一种，菜单不关，方便直接看效果
+        val theme = vm.settings.themeMode
+        DropdownMenuItem(
+            text = { Text("外观 · ${theme.label}") },
+            onClick = { vm.updateSettings(vm.settings.copy(themeMode = ThemeMode.entries[(theme.ordinal + 1) % ThemeMode.entries.size])) },
+        )
     }
 }
 
@@ -618,6 +625,7 @@ private fun shortTarget(path: String, s: AppSettings): String {
     return path
 }
 
+@Composable
 private fun pillOf(row: MediaRow): Pair<String, Color> {
     val pct = "%.0f%%".format(row.match.score * 100)
     return when (row.category) {
@@ -1102,7 +1110,9 @@ private fun LeftoversDialog(
         confirmButton = {
             if (found.isNotEmpty()) Button(
                 onClick = { onDelete(found.filter { it.dir in chosen }) }, enabled = chosen.isNotEmpty(),
-                colors = ButtonDefaults.buttonColors(containerColor = Red),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.error, contentColor = MaterialTheme.colorScheme.onError,
+                ),
             ) { Text("删除 ${chosen.size} 个") }
             else TextButton(onClick = onDismiss) { Text("好") }
         },

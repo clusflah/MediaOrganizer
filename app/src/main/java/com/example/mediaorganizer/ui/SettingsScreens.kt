@@ -33,10 +33,10 @@ import com.example.mediaorganizer.scraper.ScrapeTemplate
 import com.example.mediaorganizer.settings.AppSettings
 import com.example.mediaorganizer.storage.CleanupMode
 
-private val Accent = Color(0xFFFF7A00)
-private val Recommend = Color(0xFF1FA463)
-private val Warn = Color(0xFFEF6C00)
-private val Bad = Color(0xFFC62828)
+private val Accent: Color @Composable get() = LocalStatusColors.current.accent
+private val Recommend: Color @Composable get() = LocalStatusColors.current.recommend
+private val Warn: Color @Composable get() = LocalStatusColors.current.warn
+private val Bad: Color @Composable get() = LocalStatusColors.current.bad
 
 // =====================================================================
 //  命名规则设置

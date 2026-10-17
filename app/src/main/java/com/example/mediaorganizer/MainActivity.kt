@@ -9,7 +9,6 @@ import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -47,6 +46,7 @@ import com.example.mediaorganizer.storage.pan115.Pan115Client
 import com.example.mediaorganizer.storage.pan115.Pan115Login
 import com.example.mediaorganizer.storage.normalizePath
 import com.example.mediaorganizer.storage.parentPath
+import com.example.mediaorganizer.ui.AppTheme
 import com.example.mediaorganizer.ui.MainScreen
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
@@ -65,7 +65,7 @@ import javax.net.ssl.SSLException
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContent { MaterialTheme { Surface { AppRoot() } } }
+        setContent { AppRoot() }
     }
 }
 
@@ -73,6 +73,11 @@ enum class Page { MAIN, NAMING, SCRAPE }
 
 @Composable
 fun AppRoot(vm: MainViewModel = viewModel()) {
+    AppTheme(vm.settings.themeMode) { Surface { AppPages(vm) } }
+}
+
+@Composable
+private fun AppPages(vm: MainViewModel) {
     var page by rememberSaveable { mutableStateOf(Page.MAIN) }
     BackHandler(enabled = page != Page.MAIN) { page = Page.MAIN }
 
