@@ -1,0 +1,74 @@
+# 推送 v* 标签时：跑单元测试 → 编译并签名 release 包 → 创建 GitHub Release 并上传 APK
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 里配置（见 README「发布」一节）：
+#   SIGN_KEY_BASE64  签名密钥文件（.jks）的 base64
+#   SIGN_KEY_ALIAS   密钥别名
+#   SIGN_KEY_PWD     密码（密钥库和密钥同一个）
+#
+# 发布说明取自 .github/release-notes/<标签>.md，没有这个文件就用 GitHub 自动生成的提交列表。
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 检查签名配置和版本号
+        env:
+          SIGN_KEY_BASE64: ${{ secrets.SIGN_KEY_BASE64 }}
+          SIGN_KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
+          SIGN_KEY_PWD: ${{ secrets.SIGN_KEY_PWD }}
+        run: |
+          # 没签名的包没法覆盖安装，宁可失败也不发
+          for v in SIGN_KEY_BASE64 SIGN_KEY_ALIAS SIGN_KEY_PWD; do
+            if [ -z "${!v}" ]; then echo "::error::缺少 Secret：$v"; exit 1; fi
+          done
+          name=$(sed -n 's/.*versionName = "\(.*\)".*/\1/p' app/build.gradle.kts)
+          if [ "v$name" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::标签 $GITHUB_REF_NAME 和 versionName $name 不一致"; exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: 安装 Android SDK 组件
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" > /dev/null
+
+      - name: 单元测试
+        run: bash ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: 编译签名包
+        env:
+          SIGN_KEY_BASE64: ${{ secrets.SIGN_KEY_BASE64 }}
+          SIGN_KEY_ALIAS: ${{ secrets.SIGN_KEY_ALIAS }}
+          SIGN_KEY_PWD: ${{ secrets.SIGN_KEY_PWD }}
+        run: |
+          echo "$SIGN_KEY_BASE64" | base64 -d > "$RUNNER_TEMP/sign.jks"
+          bash ./gradlew --no-daemon :app:assembleRelease \
+            -PmoSignKeyFile="$RUNNER_TEMP/sign.jks" \
+            -PmoSignKeyAlias="$SIGN_KEY_ALIAS" \
+            -PmoSignKeyPwd="$SIGN_KEY_PWD"
+          rm -f "$RUNNER_TEMP/sign.jks"
+          "$ANDROID_HOME/build-tools/$(ls "$ANDROID_HOME/build-tools" | sort -V | tail -1)/apksigner" verify app/build/outputs/apk/release/app-release.apk
+          cp app/build/outputs/apk/release/app-release.apk "MediaOrganizer-$GITHUB_REF_NAME.apk"
+
+      - name: 创建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes=".github/release-notes/$GITHUB_REF_NAME.md"
+          if [ -f "$notes" ]; then set -- --notes-file "$notes"; else set -- --generate-notes; fi
+          gh release create "$GITHUB_REF_NAME" "MediaOrganizer-$GITHUB_REF_NAME.apk" \
+            --title "影视整理 $GITHUB_REF_NAME" "$@"

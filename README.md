@@ -22,6 +22,27 @@ moSignKeyPwd=...
 
 没配置时 release 包不签名，可改用 `./gradlew assembleDebug`。
 
+### 自动发布（GitHub Actions）
+
+推送 `v*` 标签后，Actions 会自动跑测试、编译签名包、创建 Release 并上传 `MediaOrganizer-vX.Y.apk`。
+
+**一次性设置**：仓库 Settings → Secrets and variables → Actions → New repository secret，添加三个：
+
+| 名称 | 内容 |
+|---|---|
+| `SIGN_KEY_BASE64` | 签名文件的 base64，Windows PowerShell：`[Convert]::ToBase64String([IO.File]::ReadAllBytes("E:\keys\mediaorganizer.jks")) \| Set-Clipboard` |
+| `SIGN_KEY_ALIAS` | 同 `moSignKeyAlias` |
+| `SIGN_KEY_PWD` | 同 `moSignKeyPwd` |
+
+一定要用和以前同一个签名文件，否则新包无法覆盖安装。
+
+**每次发布**：
+1. 改 `app/build.gradle.kts` 里的 `versionCode`（+1）和 `versionName`
+2. 写发布说明 `.github/release-notes/v版本号.md`（不写就用自动生成的提交列表）
+3. 合并到 main 后打标签推送：`git tag v2.6 && git push origin v2.6`
+
+标签必须和 `versionName` 一致，缺 Secret 或不一致时流程会直接失败，不会发出未签名的包。
+
 ## 二、首次设置
 
 1. **TMDB 令牌**：在 themoviedb.org 注册 → 设置 → API → 复制「API 读访问令牌」（eyJ 开头）。
