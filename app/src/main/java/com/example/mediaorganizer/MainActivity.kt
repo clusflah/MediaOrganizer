@@ -52,6 +52,10 @@ import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlin.math.abs
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -163,6 +167,9 @@ data class OrganizeSummary(
 ) {
     val total: Int get() = moves.size + renames.size + unchanged.size
 }
+
+/** 手动搜索框里直接输 TMDB ID：tmdb:16660、tmdb=16660、tmdb 16660 */
+private val TMDB_ID_QUERY = Regex("""(?i)tmdb(?:id)?\s*[:=：-]?\s*(\d+)""")
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SettingsRepository(app)
@@ -513,9 +520,45 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (!excluded) refreshPreviewAsync(all = false)
     }
 
-    suspend fun searchTmdb(query: String, tv: Boolean): List<TmdbSearchResult> {
+    /**
+     * 手动搜索。TMDB 只搜它自己的译名和原名，像「怪化猫」（TMDB 叫「物怪」）这种别名搜不到，
+     * 所以同时去豆瓣（以及填了 key 的 TheTVDB）查这个名字，拿原名 / ID 回 TMDB 找。
+     * 也可以直接输「tmdb:16660」。
+     */
+    suspend fun searchTmdb(query: String, tv: Boolean): List<TmdbSearchResult> = coroutineScope {
         val t = tmdb ?: newTmdb().also { tmdb = it }
-        return if (tv) t.searchTv(query) else t.searchMovie(query)
+        val type = if (tv) MediaType.TV else MediaType.MOVIE
+        TMDB_ID_QUERY.matchEntire(query.trim())?.let { m ->
+            return@coroutineScope listOf(t.byId(type, m.groupValues[1].toInt()))
+        }
+        val extras = OnlineExtras(settings.scrape.extra)
+        val direct = async { if (tv) t.searchTv(query) else t.searchMovie(query) }
+        val douban = async { runCatching { extras.doubanAliases(query) }.getOrDefault(emptyList()) }
+        val tvdb = async { runCatching { extras.tvdbAliases(query, tv) }.getOrDefault(emptyList()) }
+
+        val doubanAlts = douban.await().let { all -> all.filter { it.tv == tv }.ifEmpty { all } }.take(3)
+        val viaAlias = (tvdb.await().take(3) + doubanAlts).map { alt ->
+            async {
+                val label = "${alt.source}「${alt.title}」" +
+                    (alt.original?.takeIf { it != alt.title }?.let { " → $it" } ?: "")
+                runCatching {
+                    when {
+                        alt.tmdbId != null -> listOf(t.byId(type, alt.tmdbId))
+                        alt.tvdbId != null && tv -> listOfNotNull(t.findByTvdb(alt.tvdbId))
+                        else -> {
+                            val name = alt.original ?: alt.title
+                            (if (tv) t.searchTv(name, alt.year) else t.searchMovie(name, alt.year))
+                                .filter { r -> alt.year == null || r.year == null || abs(r.year - alt.year) <= 1 }
+                                .take(2)
+                        }
+                    }.map { it.copy(via = label) }
+                }.getOrDefault(emptyList())
+            }
+        }.awaitAll().flatten()
+
+        // 名字完全对上的直接结果最可信，其次是经别名找到的，再其次是其他直接结果
+        val (exact, rest) = direct.await().partition { it.title == query || it.originalTitle == query }
+        (exact + viaAlias + rest).distinctBy { it.id }
     }
 
     // ---------- 多选 ----------

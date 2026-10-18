@@ -1402,6 +1402,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, singleLine = true,
                         label = { Text("在 TMDB 搜索") },
+                        supportingText = { Text("别名会再查豆瓣 / TheTVDB；也可直接输 tmdb:ID") },
                         trailingIcon = { IconButton(onClick = ::doSearch) { Icon(Icons.Default.Search, contentDescription = "搜索") } },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { doSearch() }),
@@ -1423,7 +1424,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     when {
                         searching -> LinearProgressIndicator(Modifier.fillMaxWidth())
                         searchError != null -> Text(searchError!!, color = Red, style = MaterialTheme.typography.bodySmall)
-                        options.isEmpty() -> Text("没有结果，换个名字试试（中文名、英文原名都可以）", style = MaterialTheme.typography.bodySmall)
+                        options.isEmpty() -> Text("没有结果，换个名字试试（中文名、英文 / 日文原名都可以），或直接输 tmdb:ID", style = MaterialTheme.typography.bodySmall)
                     }
                 }
                 if (canChange && !searching) items(options, key = { "${it.type}-${it.id}" }) { opt ->
@@ -1447,6 +1448,9 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                                 .joinToString(" · "),
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.outline,
                         )
+                        opt.via?.let {
+                            Text("经$it 找到", fontSize = 12.sp, color = MaterialTheme.colorScheme.primary)
+                        }
                         opt.overview?.takeIf { it.isNotBlank() }?.let {
                             Text(it, fontSize = 12.sp, maxLines = 2, overflow = TextOverflow.Ellipsis,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant)

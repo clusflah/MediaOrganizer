@@ -24,6 +24,7 @@ data class TmdbSearchResult(
     val posterPath: String?,
     val backdropPath: String?,
     val popularity: Double,
+    val via: String? = null,      // 不是直接搜到的：经哪个别名找到（如「豆瓣 怪化猫 → モノノ怪」）
 )
 
 /** 演职人员 */
@@ -136,6 +137,15 @@ class TmdbClient(
         }
         return json.optJSONArray("results").objects().map { it.toSearchResult(MediaType.TV) }
     }
+
+    /** 按 ID 取单个条目，做成搜索结果的样子 */
+    suspend fun byId(type: MediaType, id: Int): TmdbSearchResult =
+        get(if (type == MediaType.TV) "tv/$id" else "movie/$id").toSearchResult(type)
+
+    /** TheTVDB 剧集 ID → TMDB 剧集 */
+    suspend fun findByTvdb(tvdbId: Int): TmdbSearchResult? =
+        get("find/$tvdbId") { addQueryParameter("external_source", "tvdb_id") }
+            .optJSONArray("tv_results").objects().firstOrNull()?.toSearchResult(MediaType.TV)
 
     // ---------- 详情 ----------
 

@@ -62,6 +62,20 @@ data class ExtraInfo(
         bangumiRating?.takeIf { it > 0 }?.let { "bangumi" to it } ?: doubanRating?.takeIf { it > 0 }?.let { "douban" to it }
 }
 
+/**
+ * 别的站点里查到的同一作品：TMDB 不搜别名（如「怪化猫」在 TMDB 叫「物怪」），
+ * 手动搜索时用它的原名 / ID 回 TMDB 找
+ */
+data class AltTitle(
+    val source: String,            // 豆瓣 / TheTVDB
+    val title: String,
+    val original: String?,
+    val year: Int?,
+    val tv: Boolean?,              // null = 不确定
+    val tvdbId: Int? = null,
+    val tmdbId: Int? = null,
+)
+
 /** 单集的补充信息（TheTVDB） */
 data class EpisodeExtra(val name: String?, val plot: String?)
 
@@ -167,6 +181,53 @@ class OnlineExtras(private val c: ExtraConfig, client: OkHttpClient? = null) : M
             }.getOrNull()
         } ?: return@withLock null
         detail.put("id", id)
+    }
+
+    // ---------- 别名搜索（手动搜索用） ----------
+
+    /** 豆瓣联想搜索：不用登录也不用 key，中文别名最全 */
+    suspend fun doubanAliases(query: String): List<AltTitle> {
+        val list = doubanLock.withLock {
+            val wait = 1200 - (System.currentTimeMillis() - lastDouban)
+            if (wait > 0) delay(wait)
+            lastDouban = System.currentTimeMillis()
+            JSONArray(getJson(
+                "https://movie.douban.com/j/subject_suggest?q=" + URLEncoder.encode(query, "UTF-8"),
+                "User-Agent" to DESKTOP_UA,
+            ))
+        }
+        return (0 until list.length()).map { list.getJSONObject(it) }.filter { it.optString("type") == "movie" }.map {
+            AltTitle(
+                source = "豆瓣",
+                title = it.optString("title"),
+                original = it.optString("sub_title").ifBlank { null },
+                year = it.optString("year").toIntOrNull(),
+                tv = it.optString("episode").isNotBlank(),      // 有集数的是剧集
+            )
+        }
+    }
+
+    /** TheTVDB 搜索（含别名和各语言译名）；没填 API key 时返回空 */
+    suspend fun tvdbAliases(query: String, tv: Boolean): List<AltTitle> {
+        if (c.tvdbApiKey.isBlank()) return emptyList()
+        val url = "$TVDB/search".toHttpUrl().newBuilder()
+            .addQueryParameter("query", query).addQueryParameter("type", if (tv) "series" else "movie")
+            .addQueryParameter("limit", "10").build().toString()
+        val data = JSONObject(getJson(url, "Authorization" to "Bearer ${tvdbLogin()}")).optJSONArray("data") ?: return emptyList()
+        return (0 until data.length()).map { data.getJSONObject(it) }.map { o ->
+            val remote = o.optJSONArray("remote_ids")
+            val tmdb = (0 until (remote?.length() ?: 0)).map { remote!!.getJSONObject(it) }
+                .firstOrNull { it.optString("sourceName").contains("TheMovieDB", true) }?.optString("id")?.toIntOrNull()
+            AltTitle(
+                source = "TheTVDB",
+                title = o.optString("name"),
+                original = o.optString("name"),
+                year = o.optString("year").toIntOrNull(),
+                tv = tv,
+                tvdbId = o.optString("tvdb_id").toIntOrNull(),
+                tmdbId = tmdb,
+            )
+        }
     }
 
     // ---------- Bangumi ----------
