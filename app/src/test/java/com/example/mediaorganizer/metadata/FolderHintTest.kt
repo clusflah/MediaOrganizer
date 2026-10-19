@@ -27,4 +27,37 @@ class FolderHintTest {
     @Test fun nonSeasonFoldersAreNotSeasons() {
         assertEquals(1, se("E02.mp4", "Sherlock", "S1mple").second)
     }
+
+    private fun hint(file: String, dirs: List<String>, videos: Int = 1) = parseWithFolderHint(file, dirs, videos)
+
+    @Test fun numberOnlyEpisodeInShowFolderUnderTvCategory() {
+        val p = hint("07.mp4", listOf("downloads", "影视", "电视剧", "爱情怎么翻译？（2026）"))
+        assertEquals("爱情怎么翻译？", p.title)
+        assertEquals(1, p.season)
+        assertEquals(7, p.episode)
+    }
+
+    @Test fun numberOnlyEpisodeWhenFolderHasSeveralVideos() {
+        assertEquals(3, hint("03.mp4", listOf("Show Name"), videos = 5).episode)
+        assertEquals(null, hint("03.mp4", listOf("Show Name"), videos = 1).episode)
+    }
+
+    @Test fun trailingNumberIsEpisodeUnderTvCategory() {
+        val p = hint("爱情怎么翻译 07.mp4", listOf("电视剧", "爱情怎么翻译"))
+        assertEquals(Triple("爱情怎么翻译", 1, 7), Triple(p.title, p.season, p.episode))
+    }
+
+    @Test fun movieUsesFolderWhenFileNameIsWeak() {
+        hint("movie.mkv", listOf("downloads", "小丑 (2019)")).let { assertEquals("小丑" to 2019, it.title to it.year) }
+        hint("01.mp4", listOf("电影", "小丑 (2019) 1080p")).let {
+            assertEquals("小丑" to 2019, it.title to it.year)
+            assertEquals(null, it.episode)
+        }
+        hint("Joker.1080p.mkv", listOf("电影", "小丑 (2019)")).let { assertEquals("小丑" to "1080p", it.title to it.resolution) }
+    }
+
+    @Test fun movieKeepsInformativeFileName() {
+        assertEquals("Joker", hint("Joker.2019.mkv", listOf("电影", "小丑")).title)
+        assertEquals("movie", hint("movie.mkv", listOf("合集 (2019)"), videos = 3).title)   // 多部电影放在一起的不借用
+    }
 }

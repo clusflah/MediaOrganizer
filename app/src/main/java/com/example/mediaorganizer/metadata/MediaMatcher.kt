@@ -140,18 +140,21 @@ class MediaScanner(
     private val minVideoSize: Long = 30L * 1024 * 1024,   // 小于 30MB 视为样片/广告
 ) {
     fun scan(root: String, maxDepth: Int = 6): Flow<MatchResult> = flow {
+        fun isVideo(f: RemoteFile) = !f.isDirectory &&
+            f.name.substringAfterLast('.', "").lowercase() in MediaNameParser.VIDEO_EXTENSIONS &&
+            f.size !in 1 until minVideoSize && !f.name.contains("sample", ignoreCase = true)
+
         suspend fun walk(dir: String, ancestors: List<String>, depth: Int) {
-            for (f in storage.list(dir)) {
+            val list = storage.list(dir)
+            val videos = list.count(::isVideo)      // 同一文件夹里有几个视频：多个时更像剧集
+            for (f in list) {
                 if (storage.minRequestIntervalMs > 0) delay(storage.minRequestIntervalMs)
                 if (f.isDirectory) {
                     if (depth < maxDepth && !isJunkDir(f.name)) walk(f.path, ancestors + f.name, depth + 1)
                     continue
                 }
-                val ext = f.name.substringAfterLast('.', "").lowercase()
-                if (ext !in MediaNameParser.VIDEO_EXTENSIONS) continue
-                if (f.size in 1 until minVideoSize || f.name.contains("sample", ignoreCase = true)) continue
-
-                emit(matcher.match(parseWithFolderHint(f.name, ancestors), f))
+                if (!isVideo(f)) continue
+                emit(matcher.match(parseWithFolderHint(f.name, ancestors, videos), f))
             }
         }
         // 扫描目录本身的各级文件夹名也算上：直接扫某一季的文件夹时，也能借用上面的剧名和季数
@@ -175,22 +178,46 @@ class MediaScanner(
         private val EXPLICIT_SEASON = Regex(
             """(?i)((?<![a-z0-9])s\d{1,2}[ ._-]?e|season[ ._-]?\d|(?<![0-9])\d{1,2}x\d{2,3}(?![0-9])|第\s*[0-9一二三四五六七八九十]+\s*季)""")
 
+        /** 分类文件夹：说明下面是剧集 / 电影，本身不是片名 */
+        private val TV_CATEGORY = Regex(
+            """(?i)(电视剧|剧集|连续剧|电视|美剧|日剧|韩剧|英剧|泰剧|国产剧|国剧|港剧|台剧|大陆剧|动漫|动画|番剧|新番|tv|tv ?shows?|series|shows|anime)""")
+        private val MOVIE_CATEGORY = Regex("""(?i)(电影|影片|华语电影|外语电影|movies?|films?)""")
+        /** 常见的上层目录名，既不是分类也不是片名 */
+        private val GENERIC_DIR = Regex(
+            """(?i)(影视|视频|媒体|媒体库|下载|downloads?|media|videos?|share|public|data|volume\d*|mnt|storage|emulated|sdcard|\d+)""")
+        /** 没有信息量的文件名，电影这时用文件夹名 */
+        private val GENERIC_FILE = Regex("""(?i)(movie|video|film|main|feature|正片|视频|\d+)""")
+        /** 剧集文件名末尾的集数：「爱情怎么翻译 07」「Show_12」 */
+        private val TRAILING_EPISODE = Regex("""^(.*?\D)[ ._\-](\d{1,3})$""")
+
         private fun isSeasonDir(name: String) = SEASON_DIR.containsMatchIn(name.trim())
+        private fun isCategory(name: String) = name.trim().let { TV_CATEGORY.matches(it) || MOVIE_CATEGORY.matches(it) }
+        private fun isGeneric(name: String) = GENERIC_DIR.matches(name.trim())
 
         /**
-         * 文件名只有 "S02E03.mkv" / "E02.mp4" / "03.mp4" 这种时，借用上层文件夹名当片名；
-         * 跳过 "Season 2"、"S12(2024)"、"第二季" 这类季文件夹，季数以季文件夹为准（除非文件名自己写了季）。
+         * 结合所在文件夹解析：
+         * - 文件名只有 "S02E03.mkv" / "E02.mp4" / "03.mp4" 时借用剧名文件夹当片名，季数以季文件夹为准（除非文件名自己写了季）；
+         *   纯数字文件名在季文件夹、「电视剧」等分类下、或同一文件夹有多个视频时当集数
+         * - 「电视剧」分类或季文件夹里，文件名末尾的数字当集数
+         * - 电影文件名没有信息（movie.mkv、01.mp4）或没写年份而文件夹写了时，用文件夹名
+         * 跳过季文件夹、「电视剧」「电影」等分类文件夹和 downloads 这类通用目录。
          */
-        internal fun parseWithFolderHint(fileName: String, ancestors: List<String>): ParsedMedia {
+        internal fun parseWithFolderHint(fileName: String, ancestors: List<String>, videosInFolder: Int = 1): ParsedMedia {
             val seasonDir = ancestors.lastOrNull()?.takeIf(::isSeasonDir)
             val seasonFromDir = seasonDir?.let(::seasonNumber)
-            val showFolder = ancestors.lastOrNull { !isSeasonDir(it) }
-            val bareSe = BARE_SE.containsMatchIn(fileName)
-            val bareNumber = seasonDir != null && BARE_NUMBER.matches(fileName)   // 纯数字只在季文件夹里才当集数
+            val showFolder = ancestors.lastOrNull { !isSeasonDir(it) && !isCategory(it) && !isGeneric(it) }
+            // 离文件最近的分类文件夹说了算
+            val category = ancestors.lastOrNull(::isCategory)?.trim()
+            val tvCategory = category != null && TV_CATEGORY.matches(category)
+            val movieCategory = category != null && !tvCategory
+            val tvContext = !movieCategory && (seasonDir != null || tvCategory || videosInFolder >= 2)
+            val ext = fileName.substringAfterLast('.', "").lowercase()
 
+            val bareSe = BARE_SE.containsMatchIn(fileName)
+            val bareNumber = tvContext && BARE_NUMBER.matches(fileName)
             if ((bareSe || bareNumber) && showFolder != null) {
                 // 纯数字文件名拼上去会混进片名（「暗芝居 03」），只解析剧名文件夹
-                val parsed = if (bareNumber) MediaNameParser.parse(showFolder).copy(rawName = fileName, extension = fileName.substringAfterLast('.').lowercase())
+                val parsed = if (bareNumber) MediaNameParser.parse(showFolder).copy(rawName = fileName, extension = ext)
                 else MediaNameParser.parse("$showFolder.$fileName")
                 return when {
                     bareNumber -> parsed.copy(season = seasonFromDir ?: 1, episode = Regex("""\d+""").find(fileName)!!.value.toInt())
@@ -198,9 +225,32 @@ class MediaScanner(
                     else -> parsed
                 }
             }
+
             val parsed = MediaNameParser.parse(fileName)
-            return if (parsed.isEpisode && seasonFromDir != null && !EXPLICIT_SEASON.containsMatchIn(fileName))
-                parsed.copy(season = seasonFromDir) else parsed
+            if (parsed.isEpisode) {
+                return if (seasonFromDir != null && !EXPLICIT_SEASON.containsMatchIn(fileName)) parsed.copy(season = seasonFromDir) else parsed
+            }
+
+            // 剧集分类 / 季文件夹里：「爱情怎么翻译 07.mp4」
+            val base = fileName.substringBeforeLast('.')
+            if (tvCategory || seasonDir != null) TRAILING_EPISODE.find(base.trim())?.let { m ->
+                val title = MediaNameParser.parse(m.groupValues[1]).title
+                if (title.isNotEmpty()) return parsed.copy(title = title, season = seasonFromDir ?: 1, episode = m.groupValues[2].toInt())
+            }
+
+            // 电影：独占文件夹（只有这一个视频）且文件名信息不足时，用文件夹名
+            val folder = ancestors.lastOrNull()
+            if (!tvCategory && videosInFolder <= 1 && folder != null && !isSeasonDir(folder) && !isCategory(folder) && !isGeneric(folder)) {
+                val fromFolder = MediaNameParser.parse(folder)
+                val weakName = GENERIC_FILE.matches(parsed.title.trim()) || (parsed.year == null && fromFolder.year != null)
+                if (weakName && fromFolder.title.isNotEmpty() && !fromFolder.isEpisode) return fromFolder.copy(
+                    rawName = fileName, extension = parsed.extension,
+                    resolution = parsed.resolution ?: fromFolder.resolution, source = parsed.source ?: fromFolder.source,
+                    videoCodec = parsed.videoCodec ?: fromFolder.videoCodec, audioCodec = parsed.audioCodec ?: fromFolder.audioCodec,
+                    releaseGroup = parsed.releaseGroup ?: fromFolder.releaseGroup,
+                )
+            }
+            return parsed
         }
 
         /** 只看开头的季标记，免得 "第二季 1080p" 里的 1080 被当成季数 */
