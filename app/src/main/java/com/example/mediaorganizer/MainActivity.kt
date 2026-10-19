@@ -474,16 +474,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return copy(match = match.copy(file = f.copy(path = p.targetPath, name = p.targetName)))
     }
 
-    /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果 */
-    fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.MATCH) {
-        applyChoice(key, result, applyToSame) ?: return@launchTask
+    /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果。episode = 手动指定的季集（只用于这一个） */
+    fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean, episode: Pair<Int, Int>? = null) = launchTask(Task.MATCH) {
+        val k = episode?.let { applyEpisode(key, it) } ?: key
+        applyChoice(k, result, applyToSame) ?: return@launchTask
         refreshPreview()
     }
 
     /** 选定匹配后立即整理这一个（同名的其他文件只改匹配，不整理） */
-    fun chooseAndOrganize(key: String, result: TmdbSearchResult, applyToSame: Boolean) = launchTask(Task.ORGANIZE) {
-        val newKey = applyChoice(key, result, applyToSame) ?: return@launchTask
+    fun chooseAndOrganize(key: String, result: TmdbSearchResult, applyToSame: Boolean, episode: Pair<Int, Int>? = null) = launchTask(Task.ORGANIZE) {
+        val k = episode?.let { applyEpisode(key, it) } ?: key
+        val newKey = applyChoice(k, result, applyToSame) ?: return@launchTask
         organizeSingle(newKey)               // 里面的 refreshPreview 会顺带给同名的其他文件生成目标路径
+    }
+
+    /** 只改季集，不改匹配 */
+    fun setEpisode(key: String, episode: Pair<Int, Int>) = launchTask(Task.MATCH) {
+        applyEpisode(key, episode) ?: return@launchTask
+        status = "已改为 S%02dE%02d".format(episode.first, episode.second)
+        refreshPreview()
+    }
+
+    /**
+     * 手动指定季集（文件名识别错了或没认出来时），返回该行的新 key。
+     * 已整理的从当前位置出发重新整理；连集（E01E02）被改成单集
+     */
+    private fun applyEpisode(key: String, episode: Pair<Int, Int>): String? {
+        val i = rows.indexOfFirst { it.key == key }
+        if (i < 0) return null
+        val r = rows[i]
+        val p = r.match.parsed
+        if (p.season == episode.first && p.episode == episode.second) return key
+        rows[i] = r.atCurrentLocation().copy(
+            match = r.match.copy(parsed = p.copy(season = episode.first, episode = episode.second, episodeEnd = null)),
+            plan = null, outcome = null,
+        )
+        return rows[i].key
     }
 
     /** 改匹配，返回该行的新 key（已整理过的文件位置变了，key 也会变） */
@@ -729,7 +755,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     /** 详情里单独整理一个文件；待确认的先按当前匹配确认，失败的可重试 */
-    fun organizeOne(key: String) = launchTask(Task.ORGANIZE) { organizeSingle(key) }
+    fun organizeOne(key: String, episode: Pair<Int, Int>? = null) = launchTask(Task.ORGANIZE) {
+        organizeSingle(episode?.let { applyEpisode(key, it) } ?: key)
+    }
 
     /** @param targetName 指定新文件名（「保留两者」时用），null 按命名规则 */
     private suspend fun organizeSingle(key: String, targetName: String? = null) {

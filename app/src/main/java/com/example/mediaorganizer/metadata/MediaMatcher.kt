@@ -154,45 +154,8 @@ class MediaScanner(
                 emit(matcher.match(parseWithFolderHint(f.name, ancestors), f))
             }
         }
-        walk(root, emptyList(), 0)
-    }
-
-    /**
-     * 文件名只有 "S02E03.mkv" / "03.mp4" 这种时，借用上层文件夹名，
-     * 跳过 "Season 2"、"S02"、"第二季" 这类季文件夹。
-     */
-    private fun parseWithFolderHint(fileName: String, ancestors: List<String>): ParsedMedia {
-        val seasonDir = ancestors.lastOrNull()?.takeIf { SEASON_DIR.matches(it.trim()) }
-        val bareSe = BARE_SE.containsMatchIn(fileName)
-        val bareNumber = seasonDir != null && BARE_NUMBER.matches(fileName)   // 纯数字只在季文件夹里才当集数
-        if (!bareSe && !bareNumber) return MediaNameParser.parse(fileName)
-
-        val showFolder = ancestors.lastOrNull { !SEASON_DIR.matches(it.trim()) }
-            ?: return MediaNameParser.parse(fileName)
-        val parsed = MediaNameParser.parse("$showFolder.$fileName")
-        val seasonFromDir = seasonDir?.let(::seasonNumber)
-
-        return when {
-            bareNumber -> parsed.copy(
-                season = seasonFromDir ?: 1,
-                episode = Regex("""\d+""").find(fileName)!!.value.toInt(),
-            )
-            parsed.season == null && seasonFromDir != null -> parsed.copy(season = seasonFromDir)
-            else -> parsed
-        }
-    }
-
-    private fun seasonNumber(dir: String): Int? {
-        Regex("""\d+""").find(dir)?.let { return it.value.toInt() }
-        if (dir.contains("special", true)) return 0
-        val cn = Regex("""第\s*([一二三四五六七八九十]+)\s*季""").find(dir)?.groupValues?.get(1) ?: return null
-        val digits = "一二三四五六七八九"
-        return when {
-            cn == "十" -> 10
-            cn.startsWith("十") -> 10 + digits.indexOf(cn[1]) + 1
-            cn.contains("十") -> (digits.indexOf(cn[0]) + 1) * 10 + (cn.getOrNull(2)?.let { digits.indexOf(it) + 1 } ?: 0)
-            else -> digits.indexOf(cn[0]) + 1
-        }
+        // 扫描目录本身的各级文件夹名也算上：直接扫某一季的文件夹时，也能借用上面的剧名和季数
+        walk(root, root.split('/').filter { it.isNotEmpty() }, 0)
     }
 
     private fun isJunkDir(name: String) =
@@ -203,6 +166,56 @@ class MediaScanner(
     companion object {
         private val BARE_SE = Regex("""(?i)^(S\d{1,2}[ ._-]?E\d{1,4}|EP?\d{1,4}(?!\d)|第\s*\d+\s*[集话話])""")
         private val BARE_NUMBER = Regex("""^\d{1,4}\.[A-Za-z0-9]+$""")
-        private val SEASON_DIR = Regex("""(?i)(season\s*\d+|s\d{1,2}|第\s*[0-9一二三四五六七八九十]+\s*季|specials)""")
+
+        /** 季文件夹：以季标记开头，后面可以带年份、集数说明等，如 "S12(2024)[13集全]"、"Season 2 1080p"、"第二季" */
+        private val SEASON_DIR = Regex(
+            """(?i)^(season\s*\d+|s\d{1,2}|第\s*[0-9一二三四五六七八九十]+\s*季|specials)(?![a-z0-9])""")
+
+        /** 文件名里自己写了季数（没写的话解析器默认第 1 季，应以季文件夹为准） */
+        private val EXPLICIT_SEASON = Regex(
+            """(?i)((?<![a-z0-9])s\d{1,2}[ ._-]?e|season[ ._-]?\d|(?<![0-9])\d{1,2}x\d{2,3}(?![0-9])|第\s*[0-9一二三四五六七八九十]+\s*季)""")
+
+        private fun isSeasonDir(name: String) = SEASON_DIR.containsMatchIn(name.trim())
+
+        /**
+         * 文件名只有 "S02E03.mkv" / "E02.mp4" / "03.mp4" 这种时，借用上层文件夹名当片名；
+         * 跳过 "Season 2"、"S12(2024)"、"第二季" 这类季文件夹，季数以季文件夹为准（除非文件名自己写了季）。
+         */
+        internal fun parseWithFolderHint(fileName: String, ancestors: List<String>): ParsedMedia {
+            val seasonDir = ancestors.lastOrNull()?.takeIf(::isSeasonDir)
+            val seasonFromDir = seasonDir?.let(::seasonNumber)
+            val showFolder = ancestors.lastOrNull { !isSeasonDir(it) }
+            val bareSe = BARE_SE.containsMatchIn(fileName)
+            val bareNumber = seasonDir != null && BARE_NUMBER.matches(fileName)   // 纯数字只在季文件夹里才当集数
+
+            if ((bareSe || bareNumber) && showFolder != null) {
+                // 纯数字文件名拼上去会混进片名（「暗芝居 03」），只解析剧名文件夹
+                val parsed = if (bareNumber) MediaNameParser.parse(showFolder).copy(rawName = fileName, extension = fileName.substringAfterLast('.').lowercase())
+                else MediaNameParser.parse("$showFolder.$fileName")
+                return when {
+                    bareNumber -> parsed.copy(season = seasonFromDir ?: 1, episode = Regex("""\d+""").find(fileName)!!.value.toInt())
+                    seasonFromDir != null && !EXPLICIT_SEASON.containsMatchIn(fileName) -> parsed.copy(season = seasonFromDir)
+                    else -> parsed
+                }
+            }
+            val parsed = MediaNameParser.parse(fileName)
+            return if (parsed.isEpisode && seasonFromDir != null && !EXPLICIT_SEASON.containsMatchIn(fileName))
+                parsed.copy(season = seasonFromDir) else parsed
+        }
+
+        /** 只看开头的季标记，免得 "第二季 1080p" 里的 1080 被当成季数 */
+        private fun seasonNumber(dir: String): Int? {
+            val mark = SEASON_DIR.find(dir.trim())?.value ?: return null
+            Regex("""\d+""").find(mark)?.let { return it.value.toInt() }
+            if (mark.contains("special", true)) return 0
+            val cn = Regex("""第\s*([一二三四五六七八九十]+)\s*季""").find(mark)?.groupValues?.get(1) ?: return null
+            val digits = "一二三四五六七八九"
+            return when {
+                cn == "十" -> 10
+                cn.startsWith("十") -> 10 + digits.indexOf(cn[1]) + 1
+                cn.contains("十") -> (digits.indexOf(cn[0]) + 1) * 10 + (cn.getOrNull(2)?.let { digits.indexOf(it) + 1 } ?: 0)
+                else -> digits.indexOf(cn[0]) + 1
+            }
+        }
     }
 }

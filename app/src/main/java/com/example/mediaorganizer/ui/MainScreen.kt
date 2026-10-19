@@ -34,6 +34,7 @@ import androidx.compose.ui.window.DialogWindowProvider
 import androidx.core.view.WindowCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -1384,6 +1385,15 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     val canChange = !vm.busy && row.category != RowCategory.DELETED
     val canExclude = (row.outcome == null || row.category == RowCategory.FAILED) && !vm.busy
 
+    // 手动季集：只在按剧集匹配时显示；和识别结果不同才算改了
+    var seasonText by remember(row.key) { mutableStateOf((p.season ?: 1).toString()) }
+    var episodeText by remember(row.key) { mutableStateOf(p.episode?.toString().orEmpty()) }
+    val effectiveTv = effective?.let { it.type == MediaType.TV } ?: tv
+    val seInput = seasonText.toIntOrNull()?.let { s -> episodeText.toIntOrNull()?.takeIf { it > 0 }?.let { s to it } }
+    val seChanged = effectiveTv && seInput != null &&
+        (p.episode == null || seInput.first != (p.season ?: 1) || seInput.second != p.episode)
+    val episodeArg = if (seChanged) seInput else null
+
     fun doSearch() {
         if (query.isBlank()) return
         searching = true; searchError = null
@@ -1444,11 +1454,34 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                 }
                 if (canChange) item {
                     if (row.category == RowCategory.DONE) Text(
-                        "这个文件已整理过。改选匹配后会回到「可整理」，再点整理会从当前位置移到新目标；" +
+                        "这个文件已整理过。改选匹配或季集后会回到「可整理」，再点整理会从当前位置移到新目标；" +
                             "原文件夹里已生成的 NFO 和图片不会自动删除。",
                         style = MaterialTheme.typography.bodySmall, color = Orange,
                         modifier = Modifier.padding(bottom = 8.dp),
                     )
+                    // 剧集：文件名没认出季集或认错时手动填（只改这一个文件）
+                    if (effectiveTv) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            OutlinedTextField(
+                                value = seasonText, onValueChange = { seasonText = it.filter(Char::isDigit).take(2) },
+                                label = { Text("季") }, singleLine = true, isError = seasonText.toIntOrNull() == null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = episodeText, onValueChange = { episodeText = it.filter(Char::isDigit).take(4) },
+                                label = { Text("集") }, singleLine = true, isError = episodeText.toIntOrNull()?.takeIf { it > 0 } == null,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                        Text(
+                            if (p.episode == null) "没识别出集数，请手动填写" else "识别不对时可手动改季集，只改这一个文件",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (p.episode == null) Orange else MaterialTheme.colorScheme.outline,
+                            modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
+                        )
+                    }
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, singleLine = true,
                         label = { Text("在 TMDB 搜索") },
@@ -1515,8 +1548,11 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
             val hasFile = row.match.file != null
             when {
                 pickChanged && hasFile -> Button(onClick = {
-                    vm.chooseAndOrganize(row.key, picked!!, applySame); onDismiss()
+                    vm.chooseAndOrganize(row.key, picked!!, applySame, episodeArg); onDismiss()
                 }, enabled = canChange) { Text("用此匹配整理$scrapeSuffix") }
+                seChanged && row.chosen != null && hasFile -> Button(onClick = { vm.organizeOne(row.key, episodeArg); onDismiss() }, enabled = canChange) {
+                    Text("按 S%02dE%02d 整理".format(episodeArg!!.first, episodeArg.second) + scrapeSuffix)
+                }
                 cat == RowCategory.DONE -> Button(onClick = { vm.scrapeOne(row.key); onDismiss() }, enabled = canChange) {
                     Text(if (vm.settings.autoScrape) "重新刮削" else "刮削此项")
                 }
@@ -1532,11 +1568,13 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         },
         dismissButton = {
             Row {
-                if (canExclude && !pickChanged) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
+                if (canExclude && !pickChanged && !seChanged) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
                     Text(if (row.excluded) "取消排除" else "排除")
                 }
-                if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame); onDismiss() }, enabled = canChange) {
+                if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame, episodeArg); onDismiss() }, enabled = canChange) {
                     Text("仅选用")
+                } else if (seChanged) TextButton(onClick = { vm.setEpisode(row.key, episodeArg!!); onDismiss() }, enabled = canChange) {
+                    Text("仅改季集")
                 } else if (row.category == RowCategory.PENDING) TextButton(onClick = { vm.confirm(setOf(row.key)); onDismiss() }, enabled = canChange) {
                     Text("仅确认")
                 }
