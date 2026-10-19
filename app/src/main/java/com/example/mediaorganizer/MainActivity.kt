@@ -594,12 +594,19 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 整理 / 刮削 / 撤销 ----------
 
-    private fun organizable() = rows.withIndex().filter { it.value.category == RowCategory.READY && it.value.plan != null }
+    /** @param only 只处理这些条目（多选时），null = 全部 */
+    private fun organizable(only: Set<String>? = null) = rows.withIndex().filter {
+        it.value.category == RowCategory.READY && it.value.plan != null && (only == null || it.value.key in only)
+    }
 
-    fun organizableCount() = rows.count { it.category == RowCategory.READY && it.plan != null }
+    fun organizableCount(only: Set<String>? = null) = organizable(only).size
 
-    fun organizeSummary(): OrganizeSummary {
-        val items = organizable().map { (_, r) -> r.plan!!.let { r.key to it } }
+    /** 已整理、可以（重新）刮削的条目数 */
+    fun scrapableCount(only: Set<String>? = null) =
+        rows.count { it.category == RowCategory.DONE && it.plan != null && (only == null || it.key in only) }
+
+    fun organizeSummary(only: Set<String>? = null): OrganizeSummary {
+        val items = organizable(only).map { (_, r) -> r.plan!!.let { r.key to it } }
         fun toMove(p: Pair<String, RenamePlan>) = PlannedMove(p.first, p.second.item.file.path, p.second.targetPath)
         val (unchanged, changed) = items.partition { it.second.unchanged }
         val (moves, renames) = changed.partition { parentPath(it.second.item.file.path) != normalizePath(it.second.targetDir) }
@@ -609,7 +616,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             unchanged = unchanged.map(::toMove),
             duplicates = changed.groupBy { it.second.targetPath }.filterValues { it.size > 1 }
                 .map { (target, list) -> target to list.map(::toMove) },
-            notIncluded = rows.count { it.category in setOf(RowCategory.PENDING, RowCategory.UNMATCHED, RowCategory.EXCLUDED) },
+            notIncluded = if (only == null) rows.count { it.category in setOf(RowCategory.PENDING, RowCategory.UNMATCHED, RowCategory.EXCLUDED) }
+            else rows.count { it.key !in only && it.category != RowCategory.DONE && it.category != RowCategory.DELETED },
         )
     }
 
@@ -623,6 +631,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val summary: OrganizeSummary,
         val scrapeFiles: List<String>,      // 整理后会刮削出的文件（不含 Fanart.tv 等补充来源）
         val scrapeCapped: Boolean,          // 文件太多时只算了前一部分
+        val only: Set<String>? = null,      // 只整理多选的这些；null = 全部可整理的
     )
 
     var precheck by mutableStateOf<PrecheckState?>(null)
@@ -632,10 +641,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun actionFor(c: Conflict) = conflictActions[c.key] ?: c.actions.first()
 
-    /** 点「整理」先预检：查目标位置、撞名、元数据，再给用户看 */
-    fun startOrganize() = launchTask(Task.PRECHECK) {
+    /** 点「整理」先预检：查目标位置、撞名、元数据，再给用户看；only 非 null 时只整理多选的这些 */
+    fun startOrganize(only: Set<String>? = null) = launchTask(Task.PRECHECK) {
         val s = storage ?: return@launchTask
-        val items = organizable().map { it.value.key to it.value.plan!! }
+        val items = organizable(only).map { it.value.key to it.value.plan!! }
         if (items.isEmpty()) return@launchTask
         status = "预检中…"
         val result = Precheck(s).run(items) { done, total ->
@@ -644,7 +653,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         val (files, capped) = if (settings.autoScrape) scrapePreview(items.map { it.second }) else emptyList<String>() to false
         conflictActions.clear()
-        precheck = PrecheckState(result, organizeSummary(), files, capped)
+        precheck = PrecheckState(result, organizeSummary(only), files, capped, only)
         status = if (result.conflicts.isEmpty()) "预检通过，没有冲突" else "预检发现 ${result.conflicts.size} 个问题，请逐项确认"
     }
 
@@ -665,12 +674,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val pc = precheck ?: return@launchTask
         precheck = null
         val s = storage ?: return@launchTask
+        if (pc.only != null) clearSelection()
         val taken = pc.result.existingNames.mapValues { it.value.toMutableSet() }.toMutableMap()
         val toRun = mutableListOf<IndexedValue<MediaRow>>()
         var deleted = 0
         var skipped = 0
         val errors = mutableListOf<String>()
-        for ((i, row) in organizable()) {
+        for ((i, row) in organizable(pc.only)) {
             val plan = row.plan!!
             val c = pc.result.conflictOf(row.key)
             when (c?.let { actionFor(it) } ?: ConflictAction.PROCEED) {
@@ -880,9 +890,11 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         runScrape(s, listOf(plan), overwrite = true)        // 手动刮削单项：全部重新生成
     }
 
-    fun scrapeOnly() = launchTask(Task.SCRAPE) {
+    /** 刮削已整理的条目；only 非 null 时只刮削多选的这些 */
+    fun scrapeOnly(only: Set<String>? = null) = launchTask(Task.SCRAPE) {
         val s = storage ?: return@launchTask
-        val plans = rows.filter { it.category == RowCategory.DONE }.mapNotNull { it.plan }
+        if (only != null) clearSelection()
+        val plans = rows.filter { it.category == RowCategory.DONE && (only == null || it.key in only) }.mapNotNull { it.plan }
         if (plans.isEmpty()) { status = "没有已整理的条目可刮削"; return@launchTask }
         runScrape(s, plans)
     }
