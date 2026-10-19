@@ -869,22 +869,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /**
      * 文件管理里删除 / 改名 / 移动后，同步列表里受影响的条目（文件本身或它所在的文件夹）：
-     * 删掉的标为已删除；挪了位置的更新路径并回到待整理，关闭文件管理时重新生成目标路径
+     * 删掉的标为已删除；已整理的只更新位置，仍算已整理；其余更新路径并回到待整理，
+     * 关闭文件管理时重新生成目标路径。撤销记录也跟着改，免得撤销时找不到文件
      */
     private fun remapRows(old: String, new: String?) {
         val o = normalizePath(old)
+        fun under(p: String) = p == o || p.startsWith("$o/")
+        fun moved(p: String) = normalizePath(new!!) + p.removePrefix(o)
         for (i in rows.indices) {
             val r = rows[i]
             val cur = r.currentPath ?: continue
-            if (r.category == RowCategory.DELETED || (cur != o && !cur.startsWith("$o/"))) continue
-            browseChanged = true
-            rows[i] = if (new == null) r.copy(outcome = DELETED_OUTCOME)
-            else {
-                val path = normalizePath(new) + cur.removePrefix(o)
-                val file = (r.match.file ?: continue).copy(path = path, name = path.substringAfterLast('/'))
-                r.copy(match = r.match.copy(file = file), outcome = null, plan = null)
+            if (r.category == RowCategory.DELETED || !under(cur)) continue
+            rows[i] = when {
+                new == null -> r.copy(outcome = DELETED_OUTCOME)
+                r.category == RowCategory.DONE -> {
+                    val path = moved(cur)
+                    r.copy(plan = r.plan?.copy(targetDir = parentPath(path), targetName = path.substringAfterLast('/')))
+                }
+                else -> {
+                    val path = moved(cur)
+                    val file = (r.match.file ?: continue).copy(path = path, name = path.substringAfterLast('/'))
+                    browseChanged = true
+                    r.copy(match = r.match.copy(file = file), outcome = null, plan = null)
+                }
             }
         }
+        if (lastOps.isEmpty() || lastOps.first().storageId != storageId || lastOps.none { under(normalizePath(it.toPath)) }) return
+        rememberOps(
+            if (new == null) lastOps.filterNot { under(normalizePath(it.toPath)) }
+            else lastOps.map { if (under(normalizePath(it.toPath))) it.copy(toPath = moved(normalizePath(it.toPath))) else it },
+            append = false,
+        )
     }
 
     // ---------- 目标已存在：对比和处理 ----------

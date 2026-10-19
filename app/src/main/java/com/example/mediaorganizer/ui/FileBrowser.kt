@@ -70,11 +70,14 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
         }
     }
 
-    // 打开时定位到对应的视频（列表第一行是「上一级」）
+    // 打开时定位到对应的视频（列表第一行是「上一级」）；只定位一次，之后刷新不再跳回去
+    var located by remember(req) { mutableStateOf(false) }
     LaunchedEffect(files) {
+        if (located) return@LaunchedEffect
         val h = highlight ?: return@LaunchedEffect
         val i = files?.indexOfFirst { it.name == h }?.takeIf { it >= 0 } ?: return@LaunchedEffect
         listState.scrollToItem(i + if (dir != "/") 1 else 0)
+        located = true
     }
 
     fun go(to: String) {
@@ -102,8 +105,10 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
         }
     }
 
+    // 操作进行中不能关：关掉会中途取消，删除 / 移动只做了一半
     BackHandler {
         when {
+            working -> Unit
             selected.isNotEmpty() -> selected = emptySet()
             history.isNotEmpty() -> { dir = history.removeAt(history.lastIndex); highlight = null }
             else -> vm.closeBrowser()
@@ -124,7 +129,7 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
                     TextButton(onClick = { deleting = picked }, enabled = canEdit) { Text("删除", color = LocalStatusColors.current.bad) }
                 },
             ) else TopAppBar(
-                navigationIcon = { IconButton(onClick = vm::closeBrowser) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
+                navigationIcon = { IconButton(onClick = vm::closeBrowser, enabled = !working) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
                 title = { Text(dir.substringAfterLast('/').ifEmpty { "根目录" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
                 actions = {
                     IconButton(onClick = { creating = true }, enabled = canEdit) { Icon(Icons.Default.Add, "新建文件夹") }
