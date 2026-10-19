@@ -100,7 +100,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
         bottomBar = {
             BottomBar(
                 vm, counts,
-                onOrganize = vm::startOrganize,
+                onOrganize = { vm.startOrganize() },
                 onShowPending = { showFilter(it) },
             )
         },
@@ -185,7 +185,7 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
         if (vm.rows.isNotEmpty())
             DropdownMenuItem(text = { Text("重新扫描") }, enabled = !vm.busy, onClick = { go(vm::scan) })
         if (!vm.settings.autoScrape && vm.rows.any { it.category == RowCategory.DONE })
-            DropdownMenuItem(text = { Text("刮削已整理的文件") }, enabled = !vm.busy, onClick = { go(vm::scrapeOnly) })
+            DropdownMenuItem(text = { Text("刮削已整理的文件") }, enabled = !vm.busy, onClick = { go { vm.scrapeOnly() } })
         val undo = if (vm.canUndo) vm.undoSummary() else null
         DropdownMenuItem(
             text = {
@@ -744,7 +744,28 @@ private fun BottomBar(
                     if (p != null && p.second > 0) LinearProgressIndicator(progress = { p.first.toFloat() / p.second }, modifier = Modifier.fillMaxWidth())
                     else LinearProgressIndicator(Modifier.fillMaxWidth())
                 }
-                else -> if (vm.rows.isEmpty()) {
+                else -> if (vm.selected.isNotEmpty()) {
+                    // 多选时：只整理 / 刮削选中的这部分，其余不动
+                    val sel = vm.selected
+                    val ready = vm.organizableCount(sel)
+                    val done = vm.scrapableCount(sel)
+                    val other = sel.size - ready - done
+                    Text(
+                        "已选 ${sel.size} 项：可整理 $ready 个，已整理 $done 个" +
+                            if (other > 0) "；另 $other 个未确认或未匹配，不会处理" else "",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val m = Modifier.weight(1f).height(48.dp)
+                        OutlinedButton(onClick = { vm.scrapeOnly(sel) }, enabled = !vm.busy && done > 0, modifier = m) {
+                            Text(if (done > 0) "刮削所选 $done" else "刮削所选")
+                        }
+                        Button(onClick = { vm.startOrganize(sel) }, enabled = !vm.busy && ready > 0, modifier = m) {
+                            Text(if (ready > 0) "整理所选 $ready" else "整理所选")
+                        }
+                    }
+                } else if (vm.rows.isEmpty()) {
                     Button(onClick = vm::scan, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("扫描") }
                 } else {
                     val pending = counts[RowCategory.PENDING] ?: 0
@@ -864,7 +885,9 @@ private fun PrecheckScreen(
                                 append("将整理 $runCount 个")
                                 if (skipCount > 0) append("，跳过 $skipCount 个")
                                 if (deleteCount > 0) append("，删除 $deleteCount 个")
-                                if (sum.notIncluded > 0) append("；待确认等 ${sum.notIncluded} 个不受影响")
+                                if (sum.notIncluded > 0) append(
+                                    if (pc.only != null) "；未选中的 ${sum.notIncluded} 个不受影响" else "；待确认等 ${sum.notIncluded} 个不受影响"
+                                )
                             },
                             style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                             modifier = Modifier.padding(bottom = 8.dp),
