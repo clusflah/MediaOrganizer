@@ -54,6 +54,7 @@ import com.example.mediaorganizer.storage.CleanupTarget
 import com.example.mediaorganizer.storage.StorageFactory
 import com.example.mediaorganizer.storage.StorageType
 import com.example.mediaorganizer.storage.normalizePath
+import com.example.mediaorganizer.storage.parentPath
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
@@ -804,7 +805,7 @@ private fun BottomBar(
 
 private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆页面
 
-private fun sizeText(bytes: Long?): String = when {
+internal fun sizeText(bytes: Long?): String = when {
     bytes == null || bytes <= 0 -> ""
     bytes >= 1L shl 30 -> "%.1f GB".format(bytes / (1L shl 30).toDouble())
     bytes >= 1L shl 20 -> "%.0f MB".format(bytes / (1L shl 20).toDouble())
@@ -1161,7 +1162,7 @@ private fun LeftoversDialog(
     )
 }
 
-private fun formatTime(ms: Long): String =
+internal fun formatTime(ms: Long): String =
     java.text.SimpleDateFormat("M月d日 HH:mm", java.util.Locale.CHINA).format(java.util.Date(ms))
 
 @Composable
@@ -1420,6 +1421,16 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                         MaterialTheme.colorScheme.primary)
                     else row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
+                    // 打开文件所在的文件夹：删除、改名、移动等
+                    val here = row.currentPath
+                    if (here != null && row.category != RowCategory.DELETED) Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { onDismiss(); vm.openBrowser(parentPath(here), here.substringAfterLast('/')) }) {
+                            Text("打开所在文件夹")
+                        }
+                        val target = row.plan?.targetDir?.let(::normalizePath)
+                        if (row.category != RowCategory.DONE && target != null && target != parentPath(here))
+                            TextButton(onClick = { onDismiss(); vm.openBrowser(target, row.plan!!.targetName) }) { Text("目标文件夹") }
+                    }
                     // 目标已存在 / 本批次重名：直接在这里对比、删除或决定怎么整理
                     if (row.category == RowCategory.FAILED && !pickChanged &&
                         (row.outcome.orEmpty().contains("已存在") || row.outcome.orEmpty().contains("重复"))
