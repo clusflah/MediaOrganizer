@@ -880,13 +880,39 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     // ---------- 文件管理 ----------
 
-    /** 正在浏览的文件夹；非 null 时显示文件管理页。highlight = 打开时要标出的文件名 */
-    data class BrowseRequest(val dir: String, val highlight: String? = null)
+    /** 可以用文件夹浏览来选的三个目录设置 */
+    enum class DirSetting(val label: String) { SCAN("扫描目录"), MOVIE("电影库目录"), TV("剧集库目录") }
+
+    /**
+     * 正在浏览的文件夹；非 null 时显示文件管理页。highlight = 打开时要标出的文件名；
+     * pick 非 null 时是「选文件夹」模式，选定后写回对应的目录设置
+     */
+    data class BrowseRequest(val dir: String, val highlight: String? = null, val pick: DirSetting? = null)
 
     var browse by mutableStateOf<BrowseRequest?>(null)
         private set
 
     fun openBrowser(dir: String, highlight: String? = null) { browse = BrowseRequest(normalizePath(dir), highlight) }
+
+    /** 从当前设置的目录开始浏览；不存在时文件管理页会自动退到最近的上级 */
+    fun openDirPicker(field: DirSetting) {
+        val cur = when (field) {
+            DirSetting.SCAN -> settings.scanDir
+            DirSetting.MOVIE -> settings.movieRoot
+            DirSetting.TV -> settings.tvRoot
+        }
+        browse = BrowseRequest(normalizePath(cur), pick = field)
+    }
+
+    fun pickDir(field: DirSetting, dir: String) {
+        val d = normalizePath(dir)
+        updateSettings(when (field) {
+            DirSetting.SCAN -> settings.copy(scanDir = d)
+            DirSetting.MOVIE -> settings.copy(movieRoot = d)
+            DirSetting.TV -> settings.copy(tvRoot = d)
+        })
+        closeBrowser()
+    }
 
     fun closeBrowser() {
         browse = null

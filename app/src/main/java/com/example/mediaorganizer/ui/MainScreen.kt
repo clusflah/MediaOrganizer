@@ -355,9 +355,11 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
                     style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
                     modifier = Modifier.padding(top = 8.dp),
                 )
-                SettingField("扫描目录", s.scanDir) { up(s.copy(scanDir = it)) }
-                SettingField("电影库目录", s.movieRoot) { up(s.copy(movieRoot = it)) }
-                SettingField("剧集库目录", s.tvRoot) { up(s.copy(tvRoot = it)) }
+                // 连上后可以直接浏览媒体库来选文件夹，也可以手动输入
+                val canBrowse = missing == null
+                DirField(MainViewModel.DirSetting.SCAN, s.scanDir, canBrowse, vm::openDirPicker) { up(s.copy(scanDir = it)) }
+                DirField(MainViewModel.DirSetting.MOVIE, s.movieRoot, canBrowse, vm::openDirPicker) { up(s.copy(movieRoot = it)) }
+                DirField(MainViewModel.DirSetting.TV, s.tvRoot, canBrowse, vm::openDirPicker) { up(s.copy(tvRoot = it)) }
                 Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
                     TextButton(onClick = onToggle) { Text("完成") }
                 }
@@ -805,6 +807,19 @@ private fun BottomBar(
 // ============================ 对话框 ============================
 
 private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆页面
+
+/** 目录设置：可手动输入，也可点「浏览」在媒体库里选 */
+@Composable
+private fun DirField(
+    field: MainViewModel.DirSetting, value: String, canBrowse: Boolean,
+    onBrowse: (MainViewModel.DirSetting) -> Unit, onChange: (String) -> Unit,
+) {
+    OutlinedTextField(
+        value = value, onValueChange = onChange, label = { Text(field.label) }, singleLine = true,
+        trailingIcon = { TextButton(onClick = { onBrowse(field) }, enabled = canBrowse) { Text("浏览") } },
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    )
+}
 
 internal fun sizeText(bytes: Long?): String = when {
     bytes == null || bytes <= 0 -> ""
