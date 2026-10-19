@@ -477,15 +477,20 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** 选定匹配；applyToSame 时同名的其他待确认文件一并改成这个结果。episode = 手动指定的季集（只用于这一个） */
     fun choose(key: String, result: TmdbSearchResult, applyToSame: Boolean, episode: Pair<Int, Int>? = null) = launchTask(Task.MATCH) {
         val k = episode?.let { applyEpisode(key, it) } ?: key
-        applyChoice(k, result, applyToSame) ?: return@launchTask
+        if (applyChoice(k, result, applyToSame).isEmpty()) return@launchTask
         refreshPreview()
     }
 
-    /** 选定匹配后立即整理这一个（同名的其他文件只改匹配，不整理） */
+    /**
+     * 选定匹配后立即整理。applyToSame 时同名的其他待确认文件也用这个匹配，
+     * 和这个一起先预检再整理；否则只整理这一个
+     */
     fun chooseAndOrganize(key: String, result: TmdbSearchResult, applyToSame: Boolean, episode: Pair<Int, Int>? = null) = launchTask(Task.ORGANIZE) {
         val k = episode?.let { applyEpisode(key, it) } ?: key
-        val newKey = applyChoice(k, result, applyToSame) ?: return@launchTask
-        organizeSingle(newKey)               // 里面的 refreshPreview 会顺带给同名的其他文件生成目标路径
+        val keys = applyChoice(k, result, applyToSame)
+        if (keys.isEmpty()) return@launchTask
+        if (keys.size == 1) organizeSingle(keys.first())
+        else { refreshPreview(); runPrecheck(keys.toSet()) }
     }
 
     /** 只改季集，不改匹配 */
@@ -519,7 +524,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val plan = folderPlan(key, season, episode)
             if (plan.isEmpty()) return@launchTask
             val keys = plan.mapNotNull { fe -> applyEpisode(fe.key, fe.season to fe.episode) }
-                .mapNotNull { k -> applyChoice(k, result, applyToSame = false) }
+                .mapNotNull { k -> applyChoice(k, result, applyToSame = false).firstOrNull() }
                 .toSet()
             status = "已将同文件夹 ${keys.size} 个文件匹配为「${result.title}」"
             refreshPreview()
@@ -543,22 +548,26 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         return rows[i].key
     }
 
-    /** 改匹配，返回该行的新 key（已整理过的文件位置变了，key 也会变） */
-    private fun applyChoice(key: String, result: TmdbSearchResult, applyToSame: Boolean): String? {
+    /**
+     * 改匹配，返回改到的各行的新 key，这一行排第一；找不到返回空列表
+     * （已整理过的文件位置变了，key 也会变）
+     */
+    private fun applyChoice(key: String, result: TmdbSearchResult, applyToSame: Boolean): List<String> {
         val i = rows.indexOfFirst { it.key == key }
-        if (i < 0) return null
+        if (i < 0) return emptyList()
         val group = rows[i].groupKey
-        var n = 0
+        val others = mutableListOf<String>()
         for (j in rows.indices) {
             val r = rows[j]
             if (j == i || (applyToSame && r.groupKey == group && r.isOpenForMatch())) {
                 // 失败的改匹配后可重试；已整理的从当前位置出发重新整理
                 rows[j] = r.atCurrentLocation().copy(chosen = result, confirmed = true, plan = null, outcome = null)
-                n++
+                if (j != i) others += rows[j].key
             }
         }
+        val n = others.size + 1
         status = if (n > 1) "已将 $n 个文件匹配为「${result.title}」" else "已匹配为「${result.title}」"
-        return rows[i].key
+        return listOf(rows[i].key) + others
     }
 
     /** 接受当前推荐的匹配 */

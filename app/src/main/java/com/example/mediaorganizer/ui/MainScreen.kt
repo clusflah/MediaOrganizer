@@ -28,10 +28,6 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.luminance
-import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.window.DialogWindowProvider
-import androidx.core.view.WindowCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -872,21 +868,9 @@ private fun PrecheckScreen(
     val deleteCount = chosen[ConflictAction.DELETE_SOURCE] ?: 0
     val runCount = sum.total - skipCount - deleteCount
 
-    androidx.compose.ui.window.Dialog(
-        onDismissRequest = vm::dismissPrecheck,
-        // 全屏对话框要自己处理系统栏：否则底部按钮会被手势条/导航栏挡住
-        properties = androidx.compose.ui.window.DialogProperties(usePlatformDefaultWidth = false, decorFitsSystemWindows = false),
-    ) {
-        val view = LocalView.current
-        val lightBars = MaterialTheme.colorScheme.surface.luminance() > 0.5f
-        SideEffect {
-            (view.parent as? DialogWindowProvider)?.window?.let { w ->
-                WindowCompat.getInsetsController(w, view).apply {
-                    isAppearanceLightStatusBars = lightBars
-                    isAppearanceLightNavigationBars = lightBars
-                }
-            }
-        }
+    // 盖在主界面上的全屏页，不用 Dialog：对话框窗口在部分系统上高度算错，底部按钮会被挤出屏幕
+    Surface(Modifier.fillMaxSize()) {
+        BackHandler(onBack = vm::dismissPrecheck)
         Scaffold(
             topBar = {
                 TopAppBar(
@@ -973,10 +957,17 @@ private fun PrecheckScreen(
                                         },
                                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
-                                    // 整组一键设置
-                                    Row(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
+                                    // 整组一键设置；按钮多时换行，不挤成一条
+                                    @OptIn(ExperimentalLayoutApi::class)
+                                    FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
                                         list.first().actions.forEach { a ->
-                                            AssistChip(onClick = { list.forEach { vm.conflictActions[it.key] = a } }, label = { Text("全部${a.label}", fontSize = 12.sp) })
+                                            AssistChip(
+                                                onClick = { list.forEach { vm.conflictActions[it.key] = a } },
+                                                label = {
+                                                    Text(if (a == ConflictAction.DELETE_SOURCE) "全部删除" else "全部${a.label}", fontSize = 12.sp,
+                                                        color = if (a == ConflictAction.DELETE_SOURCE) Red else Color.Unspecified)
+                                                },
+                                            )
                                         }
                                     }
                                 }
@@ -1419,6 +1410,9 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         if (folderOn && seInput != null) vm.folderPlan(row.key, seInput.first, seInput.second) else emptyList()
     }
     val folderReady = folderOn && effective != null && folderPreview.isNotEmpty()
+    // 「同时用于其他同名待确认文件」勾选且有这样的文件时，确认 / 整理按钮一起处理它们
+    val applyOthers = applySame && sameCount > 0 && !folderOn
+    val withOthers = sameCount + 1
 
     fun doSearch() {
         if (query.isBlank()) return
@@ -1553,7 +1547,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     }
                     if (sameCount > 0 && !folderOn) Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = applySame, onCheckedChange = { applySame = it })
-                        Text("同时用于其他 $sameCount 个同名待确认文件", style = MaterialTheme.typography.bodySmall)
+                        Text("同时用于其他 $sameCount 个同名待确认文件（一起确认、整理）", style = MaterialTheme.typography.bodySmall)
                     }
                     Text(
                         (if (results == null) "候选结果" else "搜索结果") + "（点选后用底部按钮整理或选用）",
@@ -1607,8 +1601,12 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     vm.applyFolder(row.key, effective!!, seInput!!.first, seInput.second, organize = true); onDismiss()
                 }, enabled = canChange) { Text("整理这 ${folderPreview.size} 个$scrapeSuffix") }
                 pickChanged && hasFile -> Button(onClick = {
-                    vm.chooseAndOrganize(row.key, picked!!, applySame, episodeArg); onDismiss()
-                }, enabled = canChange) { Text("用此匹配整理$scrapeSuffix") }
+                    vm.chooseAndOrganize(row.key, picked!!, applyOthers, episodeArg); onDismiss()
+                }, enabled = canChange) { Text(if (applyOthers) "用此匹配整理 $withOthers 个" else "用此匹配整理$scrapeSuffix") }
+                // 勾了「同时用于其他同名文件」：当前匹配也套用到它们，一起预检、整理
+                applyOthers && row.chosen != null && hasFile && cat != RowCategory.DONE -> Button(onClick = {
+                    vm.chooseAndOrganize(row.key, row.chosen!!, true, episodeArg); onDismiss()
+                }, enabled = canChange) { Text("确认并整理 $withOthers 个") }
                 seChanged && row.chosen != null && hasFile -> Button(onClick = { vm.organizeOne(row.key, episodeArg); onDismiss() }, enabled = canChange) {
                     Text("按 S%02dE%02d 整理".format(episodeArg!!.first, episodeArg.second) + scrapeSuffix)
                 }
@@ -1633,8 +1631,12 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                 if (folderReady) TextButton(onClick = {
                     vm.applyFolder(row.key, effective!!, seInput!!.first, seInput.second, organize = false); onDismiss()
                 }, enabled = canChange) { Text("仅确认") }
-                else if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame, episodeArg); onDismiss() }, enabled = canChange) {
-                    Text("仅选用")
+                else if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applyOthers, episodeArg); onDismiss() }, enabled = canChange) {
+                    Text(if (applyOthers) "仅选用 $withOthers 个" else "仅选用")
+                } else if (applyOthers && row.chosen != null && row.category != RowCategory.DONE) TextButton(onClick = {
+                    vm.choose(row.key, row.chosen!!, true, episodeArg); onDismiss()
+                }, enabled = canChange) {
+                    Text("仅确认 $withOthers 个")
                 } else if (seChanged) TextButton(onClick = { vm.setEpisode(row.key, episodeArg!!); onDismiss() }, enabled = canChange) {
                     Text("仅改季集")
                 } else if (row.category == RowCategory.PENDING) TextButton(onClick = { vm.confirm(setOf(row.key)); onDismiss() }, enabled = canChange) {
