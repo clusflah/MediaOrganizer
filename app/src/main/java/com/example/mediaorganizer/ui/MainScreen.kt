@@ -123,7 +123,6 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
                 return@LazyColumn
             }
 
-            item(key = "stats") { StatsRow(vm.rows.size, counts, vm.filter, ::showFilter) }
             stickyHeader(key = "filters") { FilterBar(vm, counts) }
             if (vm.status.isNotEmpty()) item(key = "status") {
                 Text(
@@ -559,34 +558,6 @@ private fun EmptyState(vm: MainViewModel) {
     }
 }
 
-@Composable
-private fun StatsRow(total: Int, counts: Map<RowCategory, Int>, filter: RowCategory?, onPick: (RowCategory?) -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        StatTile("扫描文件", total, MaterialTheme.colorScheme.onSurface, filter == null) { onPick(null) }
-        StatTile("待确认", counts[RowCategory.PENDING] ?: 0, Orange, filter == RowCategory.PENDING) { onPick(RowCategory.PENDING) }
-        StatTile("可整理", counts[RowCategory.READY] ?: 0, Green, filter == RowCategory.READY) { onPick(RowCategory.READY) }
-        StatTile("未匹配", counts[RowCategory.UNMATCHED] ?: 0, Red, filter == RowCategory.UNMATCHED) { onPick(RowCategory.UNMATCHED) }
-    }
-}
-
-@Composable
-private fun RowScope.StatTile(label: String, value: Int, color: Color, active: Boolean, onClick: () -> Unit) {
-    Surface(
-        onClick = onClick,
-        shape = RoundedCornerShape(12.dp),
-        color = if (active) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.weight(1f),
-    ) {
-        Column(Modifier.padding(horizontal = 10.dp, vertical = 10.dp)) {
-            Text(value.toString(), color = color, fontSize = 20.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
-            Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
-        }
-    }
-}
-
 /** 换行排列而不是横向滚动：标签都能完整看到，不会被屏幕边缘截断 */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -600,7 +571,19 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
             for (c in listOf(RowCategory.PENDING, RowCategory.READY, RowCategory.UNMATCHED, RowCategory.FAILED, RowCategory.DONE, RowCategory.EXCLUDED, RowCategory.DELETED)) {
                 val n = counts[c] ?: 0
                 if (n == 0 && vm.filter != c && c !in setOf(RowCategory.PENDING, RowCategory.READY)) continue
-                FilterChip(selected = vm.filter == c, onClick = { vm.filter = c }, label = { Text("${c.label} $n") })
+                // 数字按状态着色（待确认橙、可整理绿、未匹配 / 失败红），一眼看出哪些要处理
+                val color = when (c) {
+                    RowCategory.PENDING -> Orange
+                    RowCategory.READY -> Green
+                    RowCategory.UNMATCHED, RowCategory.FAILED -> Red
+                    else -> Color.Unspecified
+                }
+                FilterChip(selected = vm.filter == c, onClick = { vm.filter = c }, label = {
+                    Row {
+                        Text(c.label)
+                        Text(" $n", color = if (n > 0) color else Color.Unspecified, fontWeight = FontWeight.SemiBold)
+                    }
+                })
             }
             for ((t, label) in listOf(MediaType.MOVIE to "只看电影", MediaType.TV to "只看剧集")) {
                 FilterChip(
