@@ -891,7 +891,7 @@ private fun PrecheckScreen(
                                 when (s.cleanupMode) {
                                     CleanupMode.OFF -> "原文件夹保留不动。"
                                     CleanupMode.EMPTY_ONLY -> "整理后删除变空的原文件夹。"
-                                    CleanupMode.LEFTOVERS -> "整理后删除原文件夹（连同残留的 NFO、图片等）；还有其他视频或字幕的文件夹保留。"
+                                    CleanupMode.LEFTOVERS -> "整理后删除不再包含视频的原文件夹（连同字幕、NFO、图片等）；还有其他视频的文件夹保留。"
                                 },
                                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.padding(top = 12.dp),
@@ -1076,9 +1076,10 @@ private fun LeftoversDialog(
             LazyColumn {
                 item {
                     Text(
-                        if (found.isEmpty()) "扫描目录里的文件夹都还有视频、字幕或其他文件。"
+                        if (found.isEmpty() && mode == CleanupMode.EMPTY_ONLY) "扫描目录里没有空文件夹。"
+                        else if (found.isEmpty()) "扫描目录里的文件夹都还有视频（或正在下载）。"
                         else if (mode == CleanupMode.EMPTY_ONLY) "这些文件夹是空的（系统缓存文件不算）。"
-                        else "这些文件夹里没有视频和字幕，只剩 NFO、图片、txt 等残留。删除后无法撤销。",
+                        else "这些文件夹里没有视频（样片不算），里面的字幕、NFO、图片等会一起删除。删除后无法撤销。",
                         style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(bottom = 4.dp),
                     )

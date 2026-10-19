@@ -52,12 +52,25 @@ class SourceCleanerTest {
         assertTrue("库目录本身不能删", s.has(movies))
     }
 
-    @Test fun keepsFolderWithAnotherVideoOrSubtitle() = runBlocking {
-        val s = MemStorage("$movies/A/other.mkv", "$movies/B/a.chs.srt", "$movies/B/a.nfo")
+    @Test fun keepsFolderWithAnotherVideo() = runBlocking {
+        val s = MemStorage("$movies/A/other.mkv", "$movies/A/a.nfo", "$movies/B/sub/VIDEO_TS.VOB")
         val r = cleaner(s).cleanAfterMove(listOf("$movies/A", "$movies/B"))
         assertEquals(0, r.removed.size)
         assertEquals(2, r.kept.size)
-        assertTrue(s.has("$movies/A/other.mkv") && s.has("$movies/B/a.chs.srt"))
+        assertTrue(s.has("$movies/A/other.mkv") && s.has("$movies/B/sub/VIDEO_TS.VOB"))
+    }
+
+    @Test fun removesFolderWithoutVideoIncludingSubtitlesAndUnknownFiles() = runBlocking {
+        val s = MemStorage("/downloads/A/a.chs.srt", "/downloads/A/a.ass", "/downloads/A/readme.rar")
+        cleaner(s).cleanAfterMove(listOf("/downloads/A"))
+        assertFalse(s.has("/downloads/A"))
+    }
+
+    @Test fun keepsFolderStillDownloading() = runBlocking {
+        val s = MemStorage("/downloads/A/a.nfo", "/downloads/A/movie.mkv.!qb")
+        val r = cleaner(s).cleanAfterMove(listOf("/downloads/A"))
+        assertTrue(s.has("/downloads/A/movie.mkv.!qb"))
+        assertEquals(1, r.kept.size)
     }
 
     @Test fun samplesCountAsLeftovers() = runBlocking {

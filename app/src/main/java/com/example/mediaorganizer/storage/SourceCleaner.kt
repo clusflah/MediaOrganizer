@@ -6,7 +6,7 @@ import com.example.mediaorganizer.parser.MediaNameParser
 enum class CleanupMode {
     OFF,          // 不动
     EMPTY_ONLY,   // 只删空文件夹（系统自动生成的 .DS_Store、@eaDir 等不算内容）
-    LEFTOVERS,    // 连同残留的 NFO、图片、txt、样片等一起删
+    LEFTOVERS,    // 文件夹里没有视频就整个删（NFO、图片、字幕、txt、样片等一起删）
 }
 
 /** 一个可以删除的文件夹，files = 里面会被一起删掉的文件数 */
@@ -20,7 +20,7 @@ data class CleanupReport(
 
 /**
  * 只在扫描目录内部动手，且永远不删：扫描目录本身、影视库目录、它们的上级目录、
- * 本次整理的目标目录。文件夹里只要还有视频、字幕或认不出的文件就整个保留。
+ * 本次整理的目标目录。文件夹里只要还有视频（样片不算）或正在下载的文件就整个保留。
  */
 class SourceCleaner(
     private val storage: StorageProvider,
@@ -119,7 +119,8 @@ class SourceCleaner(
                 }
             } else {
                 if (isSystemJunk(f.name)) continue
-                if (mode == CleanupMode.LEFTOVERS && isLeftover(f)) { files += f.name; continue }
+                if (isDownloading(f.name)) return Verdict.Keep("${f.name} 还在下载")
+                if (mode == CleanupMode.LEFTOVERS && !isVideo(f)) { files += f.name; continue }
                 return Verdict.Keep("还有 ${f.name}")
             }
         }
@@ -127,21 +128,23 @@ class SourceCleaner(
     }
 
     companion object {
-        /** 整理/刮削工具和下载站常留下的附属文件；字幕不在其中，宁可保留 */
-        private val LEFTOVER_EXT = setOf(
-            "nfo", "jpg", "jpeg", "png", "webp", "gif", "bmp", "tbn",
-            "txt", "url", "nzb", "torrent", "sfv", "md5", "srr", "xml",
-        )
+        /** 视频格式，比解析用的列表多认一些（DVD 的 vob 等），宁可多保留 */
+        private val VIDEO_EXT = MediaNameParser.VIDEO_EXTENSIONS +
+            setOf("vob", "m4v", "mts", "3gp", "f4v", "divx", "ogv", "asf")
+
+        /** 下载软件的临时文件，有它说明还没下完 */
+        private val DOWNLOADING_EXT = setOf("part", "!qb", "!ut", "aria2", "downloading", "td", "bc!", "crdownload")
 
         fun isSystemJunk(name: String) =
             name == "@eaDir" || name == ".DS_Store" || name == "Thumbs.db" || name == "desktop.ini" ||
                 name == "#recycle" || name.startsWith("._")
 
-        fun isLeftover(f: RemoteFile): Boolean {
+        fun isDownloading(name: String) = name.substringAfterLast('.', "").lowercase() in DOWNLOADING_EXT
+
+        /** 正片视频；文件名带 sample 的样片不算 */
+        fun isVideo(f: RemoteFile): Boolean {
             val ext = f.name.substringAfterLast('.', "").lowercase()
-            if (ext in LEFTOVER_EXT) return true
-            // 样片：文件名带 sample 的视频
-            return ext in MediaNameParser.VIDEO_EXTENSIONS && f.name.contains("sample", ignoreCase = true)
+            return ext in VIDEO_EXT && !f.name.contains("sample", ignoreCase = true)
         }
     }
 }

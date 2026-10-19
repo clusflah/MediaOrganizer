@@ -160,8 +160,8 @@ fun NamingSettingsScreen(
                     }
                 }
                 SubTitle("整理后的原文件夹（电影和剧集共用）")
-                RadioOption("删除，连同残留的 NFO、图片等", settings.cleanupMode == CleanupMode.LEFTOVERS, recommended = true,
-                    desc = "还有其他视频、字幕或认不出的文件时整个保留；扫描目录和影视库目录本身不会删") {
+                RadioOption("删除不含视频的文件夹", settings.cleanupMode == CleanupMode.LEFTOVERS, recommended = true,
+                    desc = "没有视频（样片不算）就连同字幕、NFO、图片等整个删；还有视频或正在下载的保留；扫描目录和影视库目录本身不会删") {
                     onChange(settings.copy(cleanupMode = CleanupMode.LEFTOVERS))
                 }
                 RadioOption("只删除变空的文件夹", settings.cleanupMode == CleanupMode.EMPTY_ONLY) {
