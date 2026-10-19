@@ -495,6 +495,37 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         refreshPreview()
     }
 
+    // ---------- 同文件夹批量 ----------
+
+    /** 和这个文件在同一文件夹里的视频（含自己），按文件名自然排序 */
+    fun folderRows(key: String): List<MediaRow> {
+        val row = rows.firstOrNull { it.key == key } ?: return emptyList()
+        val dir = row.currentPath?.let(::parentPath) ?: return emptyList()
+        return rows.filter { it.category != RowCategory.DELETED && it.match.file != null && it.currentPath?.let(::parentPath) == dir }
+            .sortedWith(compareBy(NaturalOrder) { it.currentPath!!.substringAfterLast('/') })
+    }
+
+    /** 按这个文件指定的季集，推算同文件夹每个视频的季集（见 [folderEpisodes]） */
+    fun folderPlan(key: String, season: Int, episode: Int): List<FolderEpisode> {
+        val list = folderRows(key)
+        val self = list.firstOrNull { it.key == key } ?: return emptyList()
+        val keepOwn = self.match.parsed.episode == episode
+        return folderEpisodes(list.map { FolderFile(it.key, it.currentPath!!.substringAfterLast('/'), it.match.parsed.episode) }, key, season, episode, keepOwn)
+    }
+
+    /** 同文件夹的视频都改成这个匹配和推算出的季集；organize 时接着预检、整理（按设置刮削） */
+    fun applyFolder(key: String, result: TmdbSearchResult, season: Int, episode: Int, organize: Boolean) =
+        launchTask(if (organize) Task.PRECHECK else Task.MATCH) {
+            val plan = folderPlan(key, season, episode)
+            if (plan.isEmpty()) return@launchTask
+            val keys = plan.mapNotNull { fe -> applyEpisode(fe.key, fe.season to fe.episode) }
+                .mapNotNull { k -> applyChoice(k, result, applyToSame = false) }
+                .toSet()
+            status = "已将同文件夹 ${keys.size} 个文件匹配为「${result.title}」"
+            refreshPreview()
+            if (organize) runPrecheck(keys)
+        }
+
     /**
      * 手动指定季集（文件名识别错了或没认出来时），返回该行的新 key。
      * 已整理的从当前位置出发重新整理；连集（E01E02）被改成单集
@@ -682,10 +713,12 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     fun actionFor(c: Conflict) = conflictActions[c.key] ?: c.actions.first()
 
     /** 点「整理」先预检：查目标位置、撞名、元数据，再给用户看；only 非 null 时只整理多选的这些 */
-    fun startOrganize(only: Set<String>? = null) = launchTask(Task.PRECHECK) {
-        val s = storage ?: return@launchTask
+    fun startOrganize(only: Set<String>? = null) = launchTask(Task.PRECHECK) { runPrecheck(only) }
+
+    private suspend fun runPrecheck(only: Set<String>?) {
+        val s = storage ?: return
         val items = organizable(only).map { it.value.key to it.value.plan!! }
-        if (items.isEmpty()) return@launchTask
+        if (items.isEmpty()) return
         status = "预检中…"
         val result = Precheck(s).run(items) { done, total ->
             progress = done to total

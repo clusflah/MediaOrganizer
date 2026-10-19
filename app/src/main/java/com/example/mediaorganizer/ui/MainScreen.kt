@@ -1394,6 +1394,17 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         (p.episode == null || seInput.first != (p.season ?: 1) || seInput.second != p.episode)
     val episodeArg = if (seChanged) seInput else null
 
+    // 同文件夹批量：开了之后底部按钮作用于整个文件夹
+    val folderList = remember(row.key) { vm.folderRows(row.key) }
+    val folderCount = folderList.size
+    val folderAllRecognized = folderList.all { it.match.parsed.episode != null }
+    var folderMode by remember(row.key) { mutableStateOf(false) }
+    val folderOn = folderMode && effectiveTv && folderCount >= 2
+    val folderPreview = remember(folderOn, seInput) {
+        if (folderOn && seInput != null) vm.folderPlan(row.key, seInput.first, seInput.second) else emptyList()
+    }
+    val folderReady = folderOn && effective != null && folderPreview.isNotEmpty()
+
     fun doSearch() {
         if (query.isBlank()) return
         searching = true; searchError = null
@@ -1479,8 +1490,38 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                             if (p.episode == null) "没识别出集数，请手动填写" else "识别不对时可手动改季集，只改这一个文件",
                             style = MaterialTheme.typography.labelSmall,
                             color = if (p.episode == null) Orange else MaterialTheme.colorScheme.outline,
-                            modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
+                            modifier = Modifier.padding(top = 2.dp, bottom = if (folderCount >= 2) 0.dp else 12.dp),
                         )
+                        // 同文件夹的其他视频按文件名排序，用同样的匹配和季、递推的集数一起处理
+                        if (folderCount >= 2) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Checkbox(checked = folderMode, onCheckedChange = { folderMode = it })
+                                Text("同文件夹 $folderCount 个视频一起处理", style = MaterialTheme.typography.bodySmall)
+                            }
+                            if (folderMode) {
+                                Text(
+                                    when {
+                                        seInput == null -> "先填好季和集"
+                                        seInput.second == p.episode && folderAllRecognized -> "季统一改为 ${seInput.first}，集数用各自文件名里认出的："
+                                        else -> "按文件名排序，从这一集往前后递推："
+                                    },
+                                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
+                                )
+                                folderPreview.take(30).forEach { fe ->
+                                    Text(
+                                        "S%02dE%02d  ${fe.name}".format(fe.season, fe.episode),
+                                        style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                                        fontWeight = if (fe.key == row.key) FontWeight.Bold else FontWeight.Normal,
+                                    )
+                                }
+                                if (folderPreview.size > 30) Text("…还有 ${folderPreview.size - 30} 个", style = MaterialTheme.typography.labelSmall)
+                                if (seInput != null && folderPreview.size < folderCount) Text(
+                                    "排在前面、推算不到第 1 集的 ${folderCount - folderPreview.size} 个不处理",
+                                    style = MaterialTheme.typography.labelSmall, color = Orange,
+                                )
+                            }
+                            Spacer(Modifier.height(12.dp))
+                        }
                     }
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, singleLine = true,
@@ -1495,7 +1536,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                         FilterChip(selected = !tv, onClick = { tv = false; if (results != null) doSearch() }, label = { Text("电影") })
                         FilterChip(selected = tv, onClick = { tv = true; if (results != null) doSearch() }, label = { Text("剧集") })
                     }
-                    if (sameCount > 0) Row(verticalAlignment = Alignment.CenterVertically) {
+                    if (sameCount > 0 && !folderOn) Row(verticalAlignment = Alignment.CenterVertically) {
                         Checkbox(checked = applySame, onCheckedChange = { applySame = it })
                         Text("同时用于其他 $sameCount 个同名待确认文件", style = MaterialTheme.typography.bodySmall)
                     }
@@ -1547,6 +1588,9 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
             val cat = row.category
             val hasFile = row.match.file != null
             when {
+                folderReady -> Button(onClick = {
+                    vm.applyFolder(row.key, effective!!, seInput!!.first, seInput.second, organize = true); onDismiss()
+                }, enabled = canChange) { Text("整理这 ${folderPreview.size} 个$scrapeSuffix") }
                 pickChanged && hasFile -> Button(onClick = {
                     vm.chooseAndOrganize(row.key, picked!!, applySame, episodeArg); onDismiss()
                 }, enabled = canChange) { Text("用此匹配整理$scrapeSuffix") }
@@ -1568,10 +1612,13 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         },
         dismissButton = {
             Row {
-                if (canExclude && !pickChanged && !seChanged) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
+                if (canExclude && !pickChanged && !seChanged && !folderOn) TextButton(onClick = { vm.setExcluded(setOf(row.key), !row.excluded); onDismiss() }) {
                     Text(if (row.excluded) "取消排除" else "排除")
                 }
-                if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame, episodeArg); onDismiss() }, enabled = canChange) {
+                if (folderReady) TextButton(onClick = {
+                    vm.applyFolder(row.key, effective!!, seInput!!.first, seInput.second, organize = false); onDismiss()
+                }, enabled = canChange) { Text("仅确认") }
+                else if (pickChanged) TextButton(onClick = { vm.choose(row.key, picked!!, applySame, episodeArg); onDismiss() }, enabled = canChange) {
                     Text("仅选用")
                 } else if (seChanged) TextButton(onClick = { vm.setEpisode(row.key, episodeArg!!); onDismiss() }, enabled = canChange) {
                     Text("仅改季集")
