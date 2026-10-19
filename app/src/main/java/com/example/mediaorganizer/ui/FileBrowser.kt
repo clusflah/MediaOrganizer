@@ -57,6 +57,7 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
     val listState = rememberLazyListState()
     val cloud = vm.settings.storageType == StorageType.PAN115 || vm.settings.storageType == StorageType.ALIYUN
     val canEdit = !working && !vm.busy
+    val pick = req.pick       // 选文件夹模式：只能进文件夹、新建文件夹，不提供删除 / 改名 / 移动
 
     LaunchedEffect(dir, reload) {
         error = null
@@ -65,6 +66,11 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
             vm.browseList(dir)
         } catch (e: Exception) {
             if (e is CancellationException) throw e
+            // 选文件夹时设置里的目录可能还不存在：自动退到最近的上级
+            if (pick != null && e is StorageException && e.code == 404 && dir != "/") {
+                dir = parentPath(dir)
+                return@LaunchedEffect
+            }
             error = if (e is StorageException && e.code == 404) "文件夹不存在：$dir" else "读取失败：${e.message}"
             emptyList()
         }
@@ -130,7 +136,10 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
                 },
             ) else TopAppBar(
                 navigationIcon = { IconButton(onClick = vm::closeBrowser, enabled = !working) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
-                title = { Text(dir.substringAfterLast('/').ifEmpty { "根目录" }, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+                title = {
+                    Text(if (pick != null) "选择${pick.label}" else dir.substringAfterLast('/').ifEmpty { "根目录" },
+                        maxLines = 1, overflow = TextOverflow.Ellipsis)
+                },
                 actions = {
                     IconButton(onClick = { creating = true }, enabled = canEdit) { Icon(Icons.Default.Add, "新建文件夹") }
                     IconButton(onClick = { reload++ }) { Icon(Icons.Default.Refresh, "刷新") }
@@ -138,7 +147,20 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
             )
         },
         bottomBar = {
-            if (moving.isNotEmpty()) Surface(tonalElevation = 3.dp) {
+            if (pick != null) Surface(tonalElevation = 3.dp) {
+                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
+                    Text(
+                        "进入要用的文件夹后点下面的按钮：$dir",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(bottom = 8.dp),
+                    )
+                    Button(
+                        onClick = { vm.pickDir(pick, dir) },
+                        enabled = files != null && error == null && !working,
+                        modifier = Modifier.fillMaxWidth().height(48.dp),
+                    ) { Text("选择此文件夹") }
+                }
+            } else if (moving.isNotEmpty()) Surface(tonalElevation = 3.dp) {
                 Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 16.dp, vertical = 10.dp)) {
                     // 不能移到自己或自己的子文件夹里
                     val invalid = moving.any { it.isDirectory && (dir == normalizePath(it.path) || dir.startsWith(normalizePath(it.path) + "/")) }
@@ -193,13 +215,14 @@ fun FileBrowserScreen(vm: MainViewModel, req: MainViewModel.BrowseRequest) {
                             checked = f.path in selected,
                             highlighted = f.name == highlight,
                             enabled = canEdit,
+                            showActions = pick == null,
                             onClick = {
                                 when {
                                     selected.isNotEmpty() -> selected = if (f.path in selected) selected - f.path else selected + f.path
                                     f.isDirectory -> go(f.path)
                                 }
                             },
-                            onLongClick = { selected = selected + f.path },
+                            onLongClick = { if (pick == null) selected = selected + f.path },
                             onRename = { renaming = f },
                             onMove = { moving = listOf(f) },
                             onDelete = { deleting = listOf(f) },
@@ -269,7 +292,7 @@ private fun Breadcrumbs(dir: String, onGo: (String) -> Unit) {
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun FileRow(
-    f: RemoteFile, checked: Boolean, highlighted: Boolean, enabled: Boolean,
+    f: RemoteFile, checked: Boolean, highlighted: Boolean, enabled: Boolean, showActions: Boolean,
     onClick: () -> Unit, onLongClick: () -> Unit,
     onRename: () -> Unit, onMove: () -> Unit, onDelete: () -> Unit,
 ) {
@@ -297,7 +320,8 @@ private fun FileRow(
             if (meta.isNotEmpty()) Text(meta)
         },
         leadingContent = { if (checked) Checkbox(checked = true, onCheckedChange = null) else Text(icon) },
-        trailingContent = {
+        trailingContent = if (!showActions) null else {
+            {
             Box {
                 IconButton(onClick = { menu = true }, enabled = enabled) { Icon(Icons.Default.MoreVert, "操作") }
                 DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
@@ -305,6 +329,7 @@ private fun FileRow(
                     DropdownMenuItem(text = { Text("移动到…") }, onClick = { menu = false; onMove() })
                     DropdownMenuItem(text = { Text("删除", color = LocalStatusColors.current.bad) }, onClick = { menu = false; onDelete() })
                 }
+            }
             }
         },
         colors = ListItemDefaults.colors(containerColor = bg),
