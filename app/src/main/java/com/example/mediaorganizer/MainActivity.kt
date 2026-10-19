@@ -44,9 +44,11 @@ import com.example.mediaorganizer.storage.StorageType
 import com.example.mediaorganizer.storage.aliyun.AliyunLogin
 import com.example.mediaorganizer.storage.pan115.Pan115Client
 import com.example.mediaorganizer.storage.pan115.Pan115Login
+import com.example.mediaorganizer.storage.joinPath
 import com.example.mediaorganizer.storage.normalizePath
 import com.example.mediaorganizer.storage.parentPath
 import com.example.mediaorganizer.ui.AppTheme
+import com.example.mediaorganizer.ui.FileBrowserScreen
 import com.example.mediaorganizer.ui.MainScreen
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
@@ -89,14 +91,23 @@ private fun AppPages(vm: MainViewModel) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
         return
     }
+    Box(Modifier.fillMaxSize()) {
+        Pages(vm, page) { page = it }
+        // 文件管理盖在当前页上（下面的列表位置、筛选都保留），关掉回到原来的地方
+        vm.browse?.let { Surface(Modifier.fillMaxSize()) { FileBrowserScreen(vm, it) } }
+    }
+}
+
+@Composable
+private fun Pages(vm: MainViewModel, page: Page, setPage: (Page) -> Unit) {
     when (page) {
-        Page.MAIN -> MainScreen(vm, openNaming = { page = Page.NAMING }, openScrape = { page = Page.SCRAPE })
-        Page.NAMING -> NamingSettingsScreen(vm.settings, vm.saved, vm::updateSettings) { page = Page.MAIN; vm.refreshPreviewAsync() }
+        Page.MAIN -> MainScreen(vm, openNaming = { setPage(Page.NAMING) }, openScrape = { setPage(Page.SCRAPE) })
+        Page.NAMING -> NamingSettingsScreen(vm.settings, vm.saved, vm::updateSettings) { setPage(Page.MAIN); vm.refreshPreviewAsync() }
         Page.SCRAPE -> ScrapeSettingsScreen(
             vm.settings, vm.saved, vm::updateSettings,
             tmdbChecks = vm.tmdbChecks, testing = vm.task == Task.TEST, onTestTmdb = vm::testTmdb,
             sourceChecks = vm.sourceChecks, onTestSources = vm::testSources,
-        ) { page = Page.MAIN }
+        ) { setPage(Page.MAIN) }
     }
 }
 
@@ -117,6 +128,9 @@ data class MediaRow(
     val excluded: Boolean = false,   // 用户选择不整理
 ) {
     val key: String get() = match.file?.path ?: match.parsed.rawName
+
+    /** 文件现在在哪：已整理的在目标位置，其余还在原处 */
+    val currentPath: String? get() = if (category == RowCategory.DONE) plan?.targetPath else match.file?.path?.let(::normalizePath)
 
     val category: RowCategory get() = when {
         outcome == "ok" || outcome == "无需改动" -> RowCategory.DONE
@@ -802,6 +816,91 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissLeftovers() { leftovers = null }
+
+    // ---------- 文件管理 ----------
+
+    /** 正在浏览的文件夹；非 null 时显示文件管理页。highlight = 打开时要标出的文件名 */
+    data class BrowseRequest(val dir: String, val highlight: String? = null)
+
+    var browse by mutableStateOf<BrowseRequest?>(null)
+        private set
+
+    fun openBrowser(dir: String, highlight: String? = null) { browse = BrowseRequest(normalizePath(dir), highlight) }
+
+    fun closeBrowser() {
+        browse = null
+        if (browseChanged) { browseChanged = false; refreshPreviewAsync(all = false) }
+    }
+
+    private var browseChanged = false
+
+    private suspend fun connected(): StorageProvider = storage ?: newStorage().also { it.connect(); storage = it }
+
+    suspend fun browseList(dir: String): List<RemoteFile> = connected().list(normalizePath(dir))
+
+    /** 逐个删除，返回失败的说明 */
+    suspend fun browseDelete(files: List<RemoteFile>): List<String> {
+        val s = connected()
+        val errors = mutableListOf<String>()
+        for (f in files) {
+            try { s.delete(f); remapRows(f.path, null) } catch (e: StorageException) { errors += "${f.name}：${e.message}" }
+            if (s.minRequestIntervalMs > 0) delay(s.minRequestIntervalMs)
+        }
+        return errors
+    }
+
+    suspend fun browseRename(file: RemoteFile, newName: String) {
+        val r = connected().rename(file, newName)
+        remapRows(file.path, r.path)
+    }
+
+    suspend fun browseMkdir(dir: String, name: String) = connected().mkdirs(joinPath(dir, name))
+
+    /** 逐个移动到 targetDir，返回失败的说明 */
+    suspend fun browseMove(files: List<RemoteFile>, targetDir: String): List<String> {
+        val s = connected()
+        val errors = mutableListOf<String>()
+        for (f in files) {
+            try { val r = s.move(f, targetDir); remapRows(f.path, r.path) } catch (e: StorageException) { errors += "${f.name}：${e.message}" }
+            if (s.minRequestIntervalMs > 0) delay(s.minRequestIntervalMs)
+        }
+        return errors
+    }
+
+    /**
+     * 文件管理里删除 / 改名 / 移动后，同步列表里受影响的条目（文件本身或它所在的文件夹）：
+     * 删掉的标为已删除；已整理的只更新位置，仍算已整理；其余更新路径并回到待整理，
+     * 关闭文件管理时重新生成目标路径。撤销记录也跟着改，免得撤销时找不到文件
+     */
+    private fun remapRows(old: String, new: String?) {
+        val o = normalizePath(old)
+        fun under(p: String) = p == o || p.startsWith("$o/")
+        fun moved(p: String) = normalizePath(new!!) + p.removePrefix(o)
+        for (i in rows.indices) {
+            val r = rows[i]
+            val cur = r.currentPath ?: continue
+            if (r.category == RowCategory.DELETED || !under(cur)) continue
+            rows[i] = when {
+                new == null -> r.copy(outcome = DELETED_OUTCOME)
+                r.category == RowCategory.DONE -> {
+                    val path = moved(cur)
+                    r.copy(plan = r.plan?.copy(targetDir = parentPath(path), targetName = path.substringAfterLast('/')))
+                }
+                else -> {
+                    val path = moved(cur)
+                    val file = (r.match.file ?: continue).copy(path = path, name = path.substringAfterLast('/'))
+                    browseChanged = true
+                    r.copy(match = r.match.copy(file = file), outcome = null, plan = null)
+                }
+            }
+        }
+        if (lastOps.isEmpty() || lastOps.first().storageId != storageId || lastOps.none { under(normalizePath(it.toPath)) }) return
+        rememberOps(
+            if (new == null) lastOps.filterNot { under(normalizePath(it.toPath)) }
+            else lastOps.map { if (under(normalizePath(it.toPath))) it.copy(toPath = moved(normalizePath(it.toPath))) else it },
+            append = false,
+        )
+    }
 
     // ---------- 目标已存在：对比和处理 ----------
 
