@@ -73,19 +73,19 @@ object SamplePreviews {
     }
 
     private object FakeDetails : MediaDetails {
-        override suspend fun movie(id: Int) = TmdbMovie(
+        override suspend fun movie(id: Int, source: MetaSource) = TmdbMovie(
             id = id, title = "盗梦空间", originalTitle = "Inception", year = 2010, releaseDate = "2010-07-15",
             overview = null, runtime = 148, genres = emptyList(), imdbId = null, voteAverage = 8.4,
             posterPath = "/p", backdropPath = "/b",
         )
 
-        override suspend fun tv(id: Int) = TmdbTvShow(
+        override suspend fun tv(id: Int, source: MetaSource) = TmdbTvShow(
             id = id, name = "老友记", originalName = "Friends", firstAirYear = 1994, firstAirDate = "1994-09-22",
             overview = null, genres = emptyList(), imdbId = null, voteAverage = 8.4, posterPath = "/p", backdropPath = "/b",
             seasons = (1..10).map { TmdbSeasonSummary(it, "第 $it 季", 1993 + it, 24, "/s$it") },
         )
 
-        override suspend fun episodes(tvId: Int, season: Int) = (1..24).map {
+        override suspend fun episodes(tvId: Int, season: Int, source: MetaSource) = (1..24).map {
             TmdbEpisode(season, it, if (season == 2 && it == 3) "罗斯的新女友" else "第 $it 集", null, null, "/e", 8.0)
         }
     }

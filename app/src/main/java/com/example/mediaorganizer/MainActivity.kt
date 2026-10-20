@@ -18,6 +18,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.example.mediaorganizer.metadata.*
+import com.example.mediaorganizer.metadata.extra.ExtraConfig
 import com.example.mediaorganizer.metadata.extra.OnlineExtras
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.*
@@ -184,6 +185,8 @@ data class OrganizeSummary(
 
 /** 手动搜索框里直接输 TMDB ID：tmdb:16660、tmdb=16660、tmdb 16660 */
 private val TMDB_ID_QUERY = Regex("""(?i)tmdb(?:id)?\s*[:=：-]?\s*(\d+)""")
+// 别的来源的 ID：douban:1292052、tvdb=81189、bgm 265（只写数字的当片名搜，如「1917」）
+private val OTHER_ID_QUERY = Regex("""(?i)(?:douban|db|tvdb|bgm|bangumi)(?:id)?\s*[:=：-]?\s*(\d+)""")
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val repo = SettingsRepository(app)
@@ -430,7 +433,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
         recordConn(true)
         val t = newTmdb()
-        storage = s; tmdb = t; details = TmdbDetails(t)
+        storage = s; tmdb = t; details = TmdbDetails(t, ::otherSource)
         rows.clear()
         selected = emptySet()
         filter = null
@@ -598,6 +601,31 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         selected = emptySet()
         status = if (excluded) "已排除 $n 个，整理时会跳过" else "已恢复 $n 个"
         if (!excluded) refreshPreviewAsync(all = false)
+    }
+
+    // 豆瓣 / TheTVDB / Bangumi 当主数据源用（手动匹配时选）；按设置建一次，设置改了重建
+    private var otherSources: Pair<ExtraConfig, Map<MetaSource, MetadataSource>>? = null
+
+    private fun otherSource(source: MetaSource): MetadataSource? {
+        val c = settings.scrape.extra
+        val map = otherSources?.takeIf { it.first == c }?.second ?: mapOf(
+            MetaSource.DOUBAN to DoubanSource(),
+            MetaSource.BANGUMI to BangumiSource(),
+            MetaSource.TVDB to TvdbSource(c.tvdbApiKey, c.tvdbPin),
+        ).also { otherSources = c to it }
+        return map[source]
+    }
+
+    /**
+     * 手动搜索。source 不是 TMDB 时直接在那个站点搜，选中的条目整理和刮削都用那边的数据；
+     * 也可以直接输「douban:1292052」「tvdb:81189」「bgm:265」这种 ID。
+     */
+    suspend fun search(query: String, tv: Boolean, source: MetaSource): List<TmdbSearchResult> {
+        if (source == MetaSource.TMDB) return searchTmdb(query, tv)
+        val s = otherSource(source)!!
+        val type = if (tv) MediaType.TV else MediaType.MOVIE
+        OTHER_ID_QUERY.matchEntire(query.trim())?.let { return listOf(s.byId(type, it.groupValues[1].toInt())) }
+        return s.search(query, tv)
     }
 
     /**

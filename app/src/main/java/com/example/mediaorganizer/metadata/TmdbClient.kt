@@ -14,6 +14,17 @@ import java.util.concurrent.TimeUnit
 
 enum class MediaType { MOVIE, TV }
 
+/**
+ * 元数据来源：默认 TMDB；手动匹配时也可以直接选用豆瓣 / TheTVDB / Bangumi 的条目，
+ * 这时命名和刮削都用那个来源的数据，id 是那个来源自己的 ID
+ */
+enum class MetaSource(val label: String, val key: String) {
+    TMDB("TMDB", "tmdb"),
+    DOUBAN("豆瓣", "douban"),
+    TVDB("TheTVDB", "tvdb"),
+    BANGUMI("Bangumi", "bangumi"),
+}
+
 data class TmdbSearchResult(
     val id: Int,
     val type: MediaType,
@@ -25,6 +36,7 @@ data class TmdbSearchResult(
     val backdropPath: String?,
     val popularity: Double,
     val via: String? = null,      // 不是直接搜到的：经哪个别名找到（如「豆瓣 怪化猫 → モノノ怪」）
+    val source: MetaSource = MetaSource.TMDB,
 )
 
 /** 演职人员 */
@@ -55,6 +67,7 @@ data class TmdbMovie(
     val cast: List<TmdbPerson> = emptyList(),
     val directors: List<TmdbPerson> = emptyList(),
     val writers: List<TmdbPerson> = emptyList(),
+    val source: MetaSource = MetaSource.TMDB,
 )
 
 data class TmdbTvShow(
@@ -76,6 +89,7 @@ data class TmdbTvShow(
     val cast: List<TmdbPerson> = emptyList(),
     val status: String? = null,
     val tvdbId: Int? = null,
+    val source: MetaSource = MetaSource.TMDB,
 )
 
 data class TmdbSeasonSummary(val seasonNumber: Int, val name: String, val airYear: Int?, val episodeCount: Int, val posterPath: String?)

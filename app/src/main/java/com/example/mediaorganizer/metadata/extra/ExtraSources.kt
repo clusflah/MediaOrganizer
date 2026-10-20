@@ -1,5 +1,6 @@
 package com.example.mediaorganizer.metadata.extra
 
+import com.example.mediaorganizer.metadata.MetaSource
 import com.example.mediaorganizer.metadata.TmdbMovie
 import com.example.mediaorganizer.metadata.TmdbTvShow
 import kotlinx.coroutines.Dispatchers
@@ -90,29 +91,37 @@ class OnlineExtras(private val c: ExtraConfig, client: OkHttpClient? = null) : M
 
     private val http = (client ?: OkHttpClient()).newBuilder()
         .connectTimeout(15, TimeUnit.SECONDS).readTimeout(30, TimeUnit.SECONDS).build()
-    private val movies = ConcurrentHashMap<Int, ExtraInfo>()
-    private val shows = ConcurrentHashMap<Int, ExtraInfo>()
+    private val movies = ConcurrentHashMap<String, ExtraInfo>()
+    private val shows = ConcurrentHashMap<String, ExtraInfo>()
     private val tvdbEpisodes = ConcurrentHashMap<String, List<JSONObject>>()
 
     // 豆瓣没有官方接口，请求太密会被限流：串行 + 间隔
     private val doubanLock = Mutex()
     private var lastDouban = 0L
 
-    override suspend fun forMovie(m: TmdbMovie): ExtraInfo = movies[m.id] ?: run {
+    // 主数据源本身是豆瓣 / Bangumi 时不再去那边补查
+    override suspend fun forMovie(m: TmdbMovie): ExtraInfo = movies["${m.source}/${m.id}"] ?: run {
         val anime = isAnime(m.genres)
-        val douban = if (c.douban) runCatching { douban(m.title, m.originalTitle, m.year, tv = false) }.getOrNull() else null
-        val bgm = if (c.bangumi && anime) runCatching { bangumi(m.title, m.originalTitle, m.year) }.getOrNull() else null
-        val art = if (c.fanart && c.fanartApiKey.isNotBlank()) runCatching { fanart("movies/${m.id}", movie = true) }.getOrNull() else null
-        merge(douban, bgm, null, art).also { movies[m.id] = it }
+        val douban = if (c.douban && m.source != MetaSource.DOUBAN)
+            runCatching { douban(m.title, m.originalTitle, m.year, tv = false) }.getOrNull() else null
+        val bgm = if (c.bangumi && anime && m.source != MetaSource.BANGUMI)
+            runCatching { bangumi(m.title, m.originalTitle, m.year) }.getOrNull() else null
+        // Fanart.tv 电影认 TMDB ID 或 IMDb ID
+        val fanartId = if (m.source == MetaSource.TMDB) m.id.toString() else m.imdbId
+        val art = if (c.fanart && c.fanartApiKey.isNotBlank() && fanartId != null)
+            runCatching { fanart("movies/$fanartId", movie = true) }.getOrNull() else null
+        merge(douban, bgm, null, art).also { movies["${m.source}/${m.id}"] = it }
     }
 
-    override suspend fun forShow(s: TmdbTvShow): ExtraInfo = shows[s.id] ?: run {
+    override suspend fun forShow(s: TmdbTvShow): ExtraInfo = shows["${s.source}/${s.id}"] ?: run {
         val anime = isAnime(s.genres)
-        val douban = if (c.douban) runCatching { douban(s.name, s.originalName, s.firstAirYear, tv = true) }.getOrNull() else null
-        val bgm = if (c.bangumi && anime) runCatching { bangumi(s.name, s.originalName, s.firstAirYear) }.getOrNull() else null
+        val douban = if (c.douban && s.source != MetaSource.DOUBAN)
+            runCatching { douban(s.name, s.originalName, s.firstAirYear, tv = true) }.getOrNull() else null
+        val bgm = if (c.bangumi && anime && s.source != MetaSource.BANGUMI)
+            runCatching { bangumi(s.name, s.originalName, s.firstAirYear) }.getOrNull() else null
         val art = if (c.fanart && c.fanartApiKey.isNotBlank() && s.tvdbId != null)
             runCatching { fanart("tv/${s.tvdbId}", movie = false) }.getOrNull() else null
-        merge(douban, bgm, s.tvdbId?.toString(), art).also { shows[s.id] = it }
+        merge(douban, bgm, s.tvdbId?.toString(), art).also { shows["${s.source}/${s.id}"] = it }
     }
 
     override suspend fun forEpisode(s: TmdbTvShow, season: Int, episode: Int): EpisodeExtra? {

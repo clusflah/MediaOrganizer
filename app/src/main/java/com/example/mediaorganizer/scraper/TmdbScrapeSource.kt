@@ -38,7 +38,9 @@ class TmdbScrapeSource(
         repeat(3) { attempt ->
             try {
                 return withContext(Dispatchers.IO) {
-                    http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
+                    // 豆瓣图床防盗链，要带豆瓣的 Referer
+                    val req = Request.Builder().url(url).apply { if (url.contains("doubanio.com")) header("Referer", "https://movie.douban.com/") }.build()
+                    http.newCall(req).execute().use { resp ->
                         if (!resp.isSuccessful) throw IOException("下载图片失败 HTTP ${resp.code}")
                         resp.body!!.bytes()
                     }

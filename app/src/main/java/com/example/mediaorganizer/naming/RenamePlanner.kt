@@ -1,6 +1,8 @@
 package com.example.mediaorganizer.naming
 
 import com.example.mediaorganizer.metadata.MediaType
+import com.example.mediaorganizer.metadata.MetaSource
+import com.example.mediaorganizer.metadata.MetadataSource
 import com.example.mediaorganizer.metadata.TmdbClient
 import com.example.mediaorganizer.metadata.TmdbEpisode
 import com.example.mediaorganizer.metadata.TmdbMovie
@@ -39,24 +41,36 @@ data class RenamePlan(
 /** 媒体库目录：电影和剧集分别放到哪里 */
 data class LibraryRoots(val movieRoot: String, val tvRoot: String)
 
-/** 详情来源（带缓存）。抽成接口方便测试 */
+/** 详情来源（带缓存）。抽成接口方便测试；id 是 source 那个站点的 ID */
 interface MediaDetails {
-    suspend fun movie(id: Int): TmdbMovie
-    suspend fun tv(id: Int): TmdbTvShow
-    suspend fun episodes(tvId: Int, season: Int): List<TmdbEpisode>
+    suspend fun movie(id: Int, source: MetaSource = MetaSource.TMDB): TmdbMovie
+    suspend fun tv(id: Int, source: MetaSource = MetaSource.TMDB): TmdbTvShow
+    suspend fun episodes(tvId: Int, season: Int, source: MetaSource = MetaSource.TMDB): List<TmdbEpisode>
 }
 
-class TmdbDetails(private val tmdb: TmdbClient) : MediaDetails {
-    private val movies = ConcurrentHashMap<Int, TmdbMovie>()
-    private val shows = ConcurrentHashMap<Int, TmdbTvShow>()
+/** TMDB 详情；手动选了豆瓣 / TheTVDB / Bangumi 条目的，交给 others 里对应的来源 */
+class TmdbDetails(
+    private val tmdb: TmdbClient,
+    private val others: (MetaSource) -> MetadataSource? = { null },
+) : MediaDetails {
+    private val movies = ConcurrentHashMap<String, TmdbMovie>()
+    private val shows = ConcurrentHashMap<String, TmdbTvShow>()
     private val seasons = ConcurrentHashMap<String, List<TmdbEpisode>>()
 
-    override suspend fun movie(id: Int) = movies[id] ?: tmdb.movie(id).also { movies[id] = it }
-    override suspend fun tv(id: Int) = shows[id] ?: tmdb.tv(id).also { shows[id] = it }
-    override suspend fun episodes(tvId: Int, season: Int): List<TmdbEpisode> {
-        val key = "$tvId/$season"
+    private fun other(source: MetaSource) = others(source) ?: throw IllegalStateException("${source.label} 来源不可用")
+
+    override suspend fun movie(id: Int, source: MetaSource) = movies["$source/$id"]
+        ?: (if (source == MetaSource.TMDB) tmdb.movie(id) else other(source).movie(id)).also { movies["$source/$id"] = it }
+
+    override suspend fun tv(id: Int, source: MetaSource) = shows["$source/$id"]
+        ?: (if (source == MetaSource.TMDB) tmdb.tv(id) else other(source).tv(id)).also { shows["$source/$id"] = it }
+
+    override suspend fun episodes(tvId: Int, season: Int, source: MetaSource): List<TmdbEpisode> {
+        val key = "$source/$tvId/$season"
         seasons[key]?.let { return it }
-        val list = runCatching { tmdb.season(tvId, season) }.getOrDefault(emptyList())
+        val list = runCatching {
+            if (source == MetaSource.TMDB) tmdb.season(tvId, season) else other(source).season(tvId, season)
+        }.getOrDefault(emptyList())
         seasons[key] = list
         return list
     }
@@ -94,9 +108,9 @@ class RenamePlanner(
         val ext = item.file.name.substringAfterLast('.', "mkv")
 
         return if (m.type == MediaType.TV) {
-            val show = details.tv(m.id)
+            val show = details.tv(m.id, m.source)
             val season = p.season ?: 1
-            val ep = p.episode?.let { e -> details.episodes(m.id, season).firstOrNull { it.episodeNumber == e } }
+            val ep = p.episode?.let { e -> details.episodes(m.id, season, m.source).firstOrNull { it.episodeNumber == e } }
             NamingInput(
                 isEpisode = true,
                 chineseTitle = show.name.ifEmpty { m.title },
@@ -108,7 +122,8 @@ class RenamePlanner(
                 episodeEnd = p.episodeEnd,
                 imdbRating = show.voteAverage,
                 episodeTitle = ep?.name?.takeIf { !it.matches(Regex("""第\s*\d+\s*集|Episode \d+""")) },
-                tmdbId = m.id,
+                tmdbId = m.id.takeIf { m.source == MetaSource.TMDB },
+                ratingLabel = m.source.label,
                 resolution = p.resolution, source = p.source,
                 videoCodec = p.videoCodec, audioCodec = p.audioCodec,
                 releaseGroup = p.releaseGroup,
@@ -116,13 +131,14 @@ class RenamePlanner(
                 originalFileName = item.file.name,
             )
         } else {
-            val movie = details.movie(m.id)
+            val movie = details.movie(m.id, m.source)
             NamingInput(
                 isEpisode = false,
                 chineseTitle = movie.title.ifEmpty { m.title },
                 englishTitle = latinOrNull(movie.originalTitle),
                 year = movie.year ?: m.year,
-                tmdbId = m.id,
+                tmdbId = m.id.takeIf { m.source == MetaSource.TMDB },
+                ratingLabel = m.source.label,
                 imdbRating = movie.voteAverage,
                 resolution = p.resolution, source = p.source,
                 videoCodec = p.videoCodec, audioCodec = p.audioCodec,

@@ -5,6 +5,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -41,6 +43,7 @@ import com.example.mediaorganizer.naming.Conflict
 import com.example.mediaorganizer.naming.ConflictAction
 import com.example.mediaorganizer.naming.ConflictKind
 import com.example.mediaorganizer.metadata.MediaType
+import com.example.mediaorganizer.metadata.MetaSource
 import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.parser.MediaNameParser
 import com.example.mediaorganizer.storage.RemoteFile
@@ -1379,7 +1382,9 @@ private fun CompareLine(label: String, name: String, meta: String) {
 }
 
 private fun sameMatch(a: TmdbSearchResult?, b: TmdbSearchResult?) =
-    a != null && b != null && a.id == b.id && a.type == b.type
+    a != null && b != null && a.id == b.id && a.type == b.type && a.source == b.source
+
+private fun TmdbSearchResult.idLabel() = "${source.label} $id"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -1388,6 +1393,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     val scope = rememberCoroutineScope()
     var query by remember(row.key) { mutableStateOf(p.title) }
     var tv by remember(row.key) { mutableStateOf(row.isTv) }
+    var searchSource by remember(row.key) { mutableStateOf(row.chosen?.source ?: MetaSource.TMDB) }
     var results by remember(row.key) { mutableStateOf<List<TmdbSearchResult>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
@@ -1430,7 +1436,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
         searching = true; searchError = null
         scope.launch {
             try {
-                results = vm.searchTmdb(query.trim(), tv)
+                results = vm.search(query.trim(), tv, searchSource)
             } catch (e: Exception) {
                 if (e is CancellationException) throw e
                 searchError = "搜索失败：${e.message}"
@@ -1455,10 +1461,10 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     InfoLine("原文件", row.match.file?.path ?: p.rawName)
                     InfoLine("识别为", "${p.title} · $parsedSummary")
                     row.chosen?.let {
-                        InfoLine("当前匹配", "${it.title} (${it.year ?: "?"}) · TMDB ${it.id}" +
+                        InfoLine("当前匹配", "${it.title} (${it.year ?: "?"}) · ${it.idLabel()}" +
                             if (it == row.match.best) " · 置信度 %.0f%%".format(row.match.score * 100) else "")
                     }
-                    if (pickChanged) InfoLine("改为", "${picked!!.title} (${picked!!.year ?: "?"}) · TMDB ${picked!!.id}",
+                    if (pickChanged) InfoLine("改为", "${picked!!.title} (${picked!!.year ?: "?"}) · ${picked!!.idLabel()}",
                         MaterialTheme.colorScheme.primary)
                     else row.plan?.let { InfoLine("整理到", it.targetPath) }
                     if (row.category == RowCategory.FAILED) InfoLine("错误", row.outcome.orEmpty(), Red)
@@ -1543,10 +1549,27 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                             Spacer(Modifier.height(12.dp))
                         }
                     }
+                    // 数据来源：选了豆瓣 / TheTVDB / Bangumi 的条目，整理和刮削都用那边的数据
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MetaSource.entries.forEach { s ->
+                            FilterChip(
+                                selected = searchSource == s,
+                                onClick = { if (searchSource != s) { searchSource = s; if (results != null) doSearch() } },
+                                label = { Text(s.label) },
+                            )
+                        }
+                    }
                     OutlinedTextField(
                         value = query, onValueChange = { query = it }, singleLine = true,
-                        label = { Text("在 TMDB 搜索") },
-                        supportingText = { Text("别名会再查豆瓣 / TheTVDB；也可直接输 tmdb:ID") },
+                        label = { Text("在 ${searchSource.label} 搜索") },
+                        supportingText = {
+                            Text(when (searchSource) {
+                                MetaSource.TMDB -> "别名会再查豆瓣 / TheTVDB；也可直接输 tmdb:ID"
+                                MetaSource.DOUBAN -> "也可直接输 douban:ID；豆瓣没有分集标题和背景图，每季是单独的条目"
+                                MetaSource.TVDB -> "要在刮削设置里填 TheTVDB API key；也可直接输 tvdb:ID"
+                                MetaSource.BANGUMI -> "动画最全；也可直接输 bgm:ID，每季是单独的条目"
+                            } + if (searchSource != MetaSource.TMDB) "。不加 TMDB 标签、没有 clearlogo" else "")
+                        },
                         trailingIcon = { IconButton(onClick = ::doSearch) { Icon(Icons.Default.Search, contentDescription = "搜索") } },
                         keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
                         keyboardActions = KeyboardActions(onSearch = { doSearch() }),
@@ -1568,10 +1591,10 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     when {
                         searching -> LinearProgressIndicator(Modifier.fillMaxWidth())
                         searchError != null -> Text(searchError!!, color = Red, style = MaterialTheme.typography.bodySmall)
-                        options.isEmpty() -> Text("没有结果，换个名字试试（中文名、英文 / 日文原名都可以），或直接输 tmdb:ID", style = MaterialTheme.typography.bodySmall)
+                        options.isEmpty() -> Text("没有结果，换个名字试试（中文名、英文 / 日文原名都可以），或直接输 ${if (searchSource == MetaSource.BANGUMI) "bgm" else searchSource.key}:ID", style = MaterialTheme.typography.bodySmall)
                     }
                 }
-                if (canChange && !searching) items(options, key = { "${it.type}-${it.id}" }) { opt ->
+                if (canChange && !searching) items(options, key = { "${it.source}-${it.type}-${it.id}" }) { opt ->
                     val isEffective = sameMatch(opt, effective)
                     Column(
                         Modifier.fillMaxWidth()
@@ -1588,7 +1611,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                             }
                         }
                         Text(
-                            listOfNotNull(if (opt.type == MediaType.TV) "剧集" else "电影", opt.originalTitle, "TMDB ${opt.id}")
+                            listOfNotNull(if (opt.type == MediaType.TV) "剧集" else "电影", opt.originalTitle, opt.idLabel())
                                 .joinToString(" · "),
                             fontSize = 12.sp, color = MaterialTheme.colorScheme.outline,
                         )

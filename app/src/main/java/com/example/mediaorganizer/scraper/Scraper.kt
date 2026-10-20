@@ -1,6 +1,7 @@
 package com.example.mediaorganizer.scraper
 
 import com.example.mediaorganizer.metadata.MediaType
+import com.example.mediaorganizer.metadata.MetaSource
 import com.example.mediaorganizer.metadata.extra.EpisodeExtra
 import com.example.mediaorganizer.metadata.extra.ExtraConfig
 import com.example.mediaorganizer.metadata.extra.ExtraInfo
@@ -143,19 +144,19 @@ class Scraper(
         val base = plan.targetName.substringBeforeLast('.')
         val out = mutableListOf<OutputFile>()
         fun add(path: String, content: Content?) { if (content != null) out += OutputFile(path, content) }
-        fun poster(p: String?) = p?.let { Content.Image(source.imageUrl(it, c.quality.poster)) }
-        fun backdrop(p: String?) = p?.let { Content.Image(source.imageUrl(it, c.quality.backdrop)) }
+        fun poster(p: String?) = p?.let { Content.Image(img(it, c.quality.poster)) }
+        fun backdrop(p: String?) = p?.let { Content.Image(img(it, c.quality.backdrop)) }
         val t = c.templates
         val nfo = NfoWriter(
-            thumb = { source.imageUrl(it, "w185") },
+            thumb = { img(it, "w185") },
             maxActors = if (c.cast) c.maxActors else 0,
         )
 
         if (!input.isEpisode) {
-            val movie = details.movie(input.tmdbId)
+            val movie = details.movie(plan.item.match.id, plan.item.match.source)
             val ex = extras?.let { runCatching { it.forMovie(movie) }.getOrNull() }
             val logo = if (!c.logo) null else ex?.art?.logo?.let { Content.Image(it) }
-                ?: source.logoPath(MediaType.MOVIE, movie.id)?.let { Content.Image(source.imageUrl(it, "original")) }
+                ?: tmdbLogo(MediaType.MOVIE, movie.id, movie.source)?.let { Content.Image(source.imageUrl(it, "original")) }
             if (c.nfo) add(joinPath(dir, "$base.nfo"), Content.Text(nfo.movie(movie, ex)))
 
             // 独占文件夹用通用名；和别的电影混放时只能用“视频名-xxx”
@@ -177,10 +178,10 @@ class Scraper(
         }
 
         // ---------- 剧集 ----------
-        val show = details.tv(input.tmdbId)
+        val show = details.tv(plan.item.match.id, plan.item.match.source)
         val showDir = plan.showDir
         val season = input.season ?: 1
-        val ep = input.episode?.let { e -> details.episodes(show.id, season).firstOrNull { it.episodeNumber == e } }
+        val ep = input.episode?.let { e -> details.episodes(show.id, season, show.source).firstOrNull { it.episodeNumber == e } }
 
         val ex = extras?.let { runCatching { it.forShow(show) }.getOrNull() }
 
@@ -189,7 +190,7 @@ class Scraper(
         if (c.poster) add(joinPath(showDir, "poster.jpg"), poster(show.posterPath))
         if (c.fanart) add(joinPath(showDir, "fanart.jpg"), backdrop(show.backdropPath))
         if (c.logo) add(joinPath(showDir, "clearlogo.png"), ex?.art?.logo?.let { Content.Image(it) }
-            ?: source.logoPath(MediaType.TV, show.id)?.let { Content.Image(source.imageUrl(it, "original")) })
+            ?: tmdbLogo(MediaType.TV, show.id, show.source)?.let { Content.Image(source.imageUrl(it, "original")) })
         if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) addFanart(ex, showDir, "", ::add)
         if (ScrapeTemplate.INFUSE in t && c.poster) add(joinPath(showDir, "folder.jpg"), poster(show.posterPath))
 
@@ -218,6 +219,13 @@ class Scraper(
     }
 
     /** Fanart.tv 的高清图：clearart、横幅、横版海报、光盘图（logo 已替换上面的 clearlogo） */
+    /** TMDB 给的是图片路径，要拼尺寸；豆瓣 / TheTVDB / Bangumi 给的已是完整地址 */
+    private fun img(path: String, size: String) = if (path.startsWith("http")) path else source.imageUrl(path, size)
+
+    /** clearlogo 只有 TMDB 有；别的来源的 ID 不能拿去查 TMDB */
+    private suspend fun tmdbLogo(type: MediaType, id: Int, from: MetaSource) =
+        if (from == MetaSource.TMDB) source.logoPath(type, id) else null
+
     private fun addFanart(ex: ExtraInfo?, dir: String, prefix: String, add: (String, Content?) -> Unit) {
         val a = ex?.art ?: return
         a.clearart?.let { add(joinPath(dir, "${prefix}clearart.png"), Content.Image(it)) }
@@ -257,12 +265,13 @@ class NfoWriter(
         m.genres.forEach { tag("genre", it) }
         m.countries.forEach { tag("country", it) }
         m.studios.take(3).forEach { tag("studio", it) }
-        rating(m.voteAverage, ex)
-        uniqueId("tmdb", m.id.toString(), default = true)
+        rating(m.voteAverage, ex, m.source)
+        uniqueId(m.source.key, m.id.toString(), default = true)
         uniqueId("imdb", m.imdbId)
-        extraIds(ex)
-        tag("tmdbid", m.id)
+        extraIds(ex, m.source)
+        if (m.source == MetaSource.TMDB) tag("tmdbid", m.id)
         tag("imdbid", m.imdbId)
+        tmdbPeople = m.source == MetaSource.TMDB
         if (maxActors > 0) {
             m.directors.forEach { person("director", it) }
             m.writers.forEach { person("credits", it) }
@@ -281,17 +290,18 @@ class NfoWriter(
         s.genres.forEach { tag("genre", it) }
         s.countries.forEach { tag("country", it) }
         s.studios.take(3).forEach { tag("studio", it) }
-        rating(s.voteAverage, ex)
-        uniqueId("tmdb", s.id.toString(), default = true)
+        rating(s.voteAverage, ex, s.source)
+        uniqueId(s.source.key, s.id.toString(), default = true)
         uniqueId("imdb", s.imdbId)
         val tvdb = ex?.tvdbId ?: s.tvdbId?.toString()
-        uniqueId("tvdb", tvdb)
-        extraIds(ex)
-        tag("tmdbid", s.id)
+        if (s.source != MetaSource.TVDB) uniqueId("tvdb", tvdb)
+        extraIds(ex, s.source)
+        if (s.source == MetaSource.TMDB) tag("tmdbid", s.id)
         tag("imdbid", s.imdbId)
         tag("tvdbid", tvdb)
         tag("season", -1)
         tag("episode", -1)
+        tmdbPeople = s.source == MetaSource.TMDB
         if (maxActors > 0) {
             s.creators.forEach { person("credits", it) }
             actors(s.cast)
@@ -307,7 +317,8 @@ class NfoWriter(
         tag("plot", e?.overview?.takeIf { it.isNotBlank() } ?: extra?.plot)
         tag("aired", e?.airDate)
         tag("premiered", e?.airDate)
-        if (e != null && e.voteAverage > 0) rating(e.voteAverage)
+        if (e != null && e.voteAverage > 0) rating(e.voteAverage, from = s.source)
+        tmdbPeople = s.source == MetaSource.TMDB
         if (maxActors > 0 && e != null) {
             e.directors.forEach { person("director", it) }
             e.writers.forEach { person("credits", it) }
@@ -328,13 +339,20 @@ class NfoWriter(
             sb.append("  <uniqueid type=\"$type\"").append(if (default) " default=\"true\"" else "")
                 .append(">").append(escape(value)).append("</uniqueid>\n")
         }
-        /** 多来源评分都写进 <ratings>；default 和 <rating> 用首选来源（豆瓣 / Bangumi 开启并优先时） */
-        fun rating(tmdb: Double, ex: ExtraInfo? = null) {
+        /** 演职人员的 id 是 TMDB 人物 ID 时才写（别的来源没有） */
+        var tmdbPeople = true
+
+        /**
+         * 多来源评分都写进 <ratings>；default 和 <rating> 用首选来源（豆瓣 / Bangumi 开启并优先时）。
+         * @param main 主数据源的评分，名字按 from 来
+         */
+        fun rating(main: Double, ex: ExtraInfo? = null, from: MetaSource = MetaSource.TMDB) {
+            val mainName = if (from == MetaSource.TMDB) "themoviedb" else from.key
             val list = buildList {
-                if (tmdb > 0) add(Triple("themoviedb", tmdb, null as Int?))
+                if (main > 0) add(Triple(mainName, main, null as Int?))
                 ex?.doubanRating?.takeIf { it > 0 }?.let { add(Triple("douban", it, ex.doubanVotes)) }
                 ex?.bangumiRating?.takeIf { it > 0 }?.let { add(Triple("bangumi", it, ex.bangumiVotes)) }
-            }
+            }.distinctBy { it.first }
             if (list.isEmpty()) return
             val preferred = ex?.preferredRating?.first?.takeIf { p -> list.any { it.first == p } } ?: list.first().first
             sb.append("  <ratings>\n")
@@ -347,14 +365,15 @@ class NfoWriter(
             sb.append("  </ratings>\n")
             tag("rating", "%.1f".format(Locale.US, list.first { it.first == preferred }.second))
         }
-        fun extraIds(ex: ExtraInfo?) {
-            uniqueId("douban", ex?.doubanId)
-            uniqueId("bangumi", ex?.bangumiId)
+        /** 主数据源自己的 ID 已经写过，不重复 */
+        fun extraIds(ex: ExtraInfo?, from: MetaSource = MetaSource.TMDB) {
+            if (from != MetaSource.DOUBAN) uniqueId("douban", ex?.doubanId)
+            if (from != MetaSource.BANGUMI) uniqueId("bangumi", ex?.bangumiId)
         }
         /** Emby 能识别 tmdbid 属性，直接关联到人物页 */
         fun person(name: String, p: TmdbPerson) {
             if (p.name.isBlank()) return
-            sb.append("  <$name tmdbid=\"${p.id}\">").append(escape(p.name)).append("</$name>\n")
+            sb.append(if (tmdbPeople) "  <$name tmdbid=\"${p.id}\">" else "  <$name>").append(escape(p.name)).append("</$name>\n")
         }
         fun actors(list: List<TmdbPerson>) {
             list.sortedBy { it.order }.take(maxActors).forEachIndexed { i, p ->
@@ -365,7 +384,7 @@ class NfoWriter(
                 sb.append("    <type>Actor</type>\n")
                 sb.append("    <order>").append(i).append("</order>\n")
                 p.profilePath?.let(thumb)?.let { sb.append("    <thumb>").append(escape(it)).append("</thumb>\n") }
-                sb.append("    <tmdbid>").append(p.id).append("</tmdbid>\n")
+                if (tmdbPeople) sb.append("    <tmdbid>").append(p.id).append("</tmdbid>\n")
                 sb.append("  </actor>\n")
             }
         }

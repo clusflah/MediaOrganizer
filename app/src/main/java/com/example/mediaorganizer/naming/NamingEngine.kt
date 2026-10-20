@@ -41,6 +41,7 @@ data class TmdbTagFormat(
     val joiner: String = "-",       // "-" 或 "="
 ) {
     fun format(id: Int) = "${bracket.open}$key$joiner$id${bracket.close}"
+    fun formatOrNull(id: Int?) = id?.let(::format)
 }
 
 /** 文件名各组成部分，顺序可自定义（显示顺序自定义） */
@@ -108,8 +109,9 @@ data class NamingInput(
     val episode: Int? = null,
     val episodeEnd: Int? = null,
     val episodeTitle: String? = null,
-    val tmdbId: Int,
+    val tmdbId: Int?,               // 选用的不是 TMDB 条目时为 null，不加 TMDB 标签
     val imdbRating: Double? = null,
+    val ratingLabel: String = "TMDB",   // 评分来自哪个站点
     val resolution: String? = null,
     val source: String? = null,
     val videoCodec: String? = null,
@@ -133,7 +135,7 @@ class NamingEngine(private val config: NamingConfig) {
         val fileBase = if (c.tmdbTagMode == TmdbTagMode.TAG_ONLY) {
             // 不改名，仅在末尾加标签
             val original = input.originalFileName.substringBeforeLast('.')
-            "$original ${c.tmdbTagFormat.format(input.tmdbId)}"
+            listOfNotNull(original, c.tmdbTagFormat.formatOrNull(input.tmdbId)).joinToString(" ")
         } else {
             join(fileParts(input, withTag = c.tmdbTagMode == TmdbTagMode.RENAME_AND_TAG && c.tmdbTagOnFile))
         }
@@ -187,8 +189,8 @@ class NamingEngine(private val config: NamingConfig) {
                 Part.EXTRA_INFO -> if (config.extraInfo)
                     listOfNotNull(input.resolution, input.source, input.videoCodec, input.audioCodec)
                         .joinToString(config.separator.value).ifEmpty { null } else null
-                Part.RATING -> if (config.imdbRating) input.imdbRating?.takeIf { it > 0 }?.let { "TMDB%.1f".format(java.util.Locale.US, it) } else null
-                Part.TMDB_TAG -> if (withTag) config.tmdbTagFormat.format(input.tmdbId) else null
+                Part.RATING -> if (config.imdbRating) input.imdbRating?.takeIf { it > 0 }?.let { "${input.ratingLabel}%.1f".format(java.util.Locale.US, it) } else null
+                Part.TMDB_TAG -> if (withTag) config.tmdbTagFormat.formatOrNull(input.tmdbId) else null
             }
         }.toMutableList()
         // 发布组用 "-" 接在最后一个非标签、非评分部分后面：… AC3-EVO {tmdb-1668}
@@ -206,7 +208,7 @@ class NamingEngine(private val config: NamingConfig) {
         val parts = listOfNotNull(
             title(input),
             input.year?.let { if (config.yearStyle == YearStyle.PLAIN) "$it" else "($it)" },
-            if (withTag) config.tmdbTagFormat.format(input.tmdbId) else null,
+            if (withTag) config.tmdbTagFormat.formatOrNull(input.tmdbId) else null,
         )
         return parts.joinToString(" ")
     }
