@@ -568,6 +568,14 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             FilterChip(selected = vm.filter == null, onClick = { vm.filter = null }, label = { Text("全部 ${vm.rows.size}") })
+            // 类型筛选紧跟「全部」放第一行，状态筛选在下面
+            for ((t, label) in listOf(MediaType.MOVIE to "只看电影", MediaType.TV to "只看剧集")) {
+                FilterChip(
+                    selected = vm.typeFilter == t,
+                    onClick = { vm.typeFilter = if (vm.typeFilter == t) null else t },
+                    label = { Text(label) },
+                )
+            }
             for (c in listOf(RowCategory.PENDING, RowCategory.READY, RowCategory.UNMATCHED, RowCategory.FAILED, RowCategory.DONE, RowCategory.EXCLUDED, RowCategory.DELETED)) {
                 val n = counts[c] ?: 0
                 if (n == 0 && vm.filter != c && c !in setOf(RowCategory.PENDING, RowCategory.READY)) continue
@@ -584,13 +592,6 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
                         Text(" $n", color = if (n > 0) color else Color.Unspecified, fontWeight = FontWeight.SemiBold)
                     }
                 })
-            }
-            for ((t, label) in listOf(MediaType.MOVIE to "只看电影", MediaType.TV to "只看剧集")) {
-                FilterChip(
-                    selected = vm.typeFilter == t,
-                    onClick = { vm.typeFilter = if (vm.typeFilter == t) null else t },
-                    label = { Text(label) },
-                )
             }
         }
     }
