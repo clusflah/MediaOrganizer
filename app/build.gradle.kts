@@ -18,8 +18,8 @@ android {
         applicationId = "com.example.mediaorganizer"
         minSdk = 26
         targetSdk = 36
-        versionCode = 26
-        versionName = "2.15"
+        versionCode = 27
+        versionName = "2.16"
     }
 
     signingConfigs {
