@@ -124,6 +124,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
             }
 
             stickyHeader(key = "filters") { FilterBar(vm, counts) }
+            vm.filter?.let { f -> item(key = "hint") { FilterHint(f) } }
             if (vm.status.isNotEmpty()) item(key = "status") {
                 Text(
                     vm.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -594,6 +595,32 @@ private fun FilterBar(vm: MainViewModel, counts: Map<RowCategory, Int>) {
                 })
             }
         }
+    }
+}
+
+/** 选中某个状态筛选时，说明这类条目是什么、能怎么处理 */
+@Composable
+private fun FilterHint(c: RowCategory) {
+    val text = when (c) {
+        RowCategory.PENDING -> "识别出了影片，但把握不大（百分比是可信度）。点「确认匹配」采用，点「更换」挑别的结果或手动搜索；" +
+            "确认后进入「可整理」。长按可多选，批量确认。"
+        RowCategory.READY -> "已确认匹配。点底部「整理」会按命名规则移动、改名（开了自动刮削会一起刮削）。" +
+            "点条目可看目标路径或改匹配；长按多选后可只整理选中的。"
+        RowCategory.UNMATCHED -> "没在 TMDB 找到对应影片，整理时不会处理。点「手动搜索」输入中文名、原名或 tmdb:ID；确实不需要的可以排除。"
+        RowCategory.FAILED -> "整理时出错，红字是原因。点条目查看详情：可重试、改匹配；「目标已存在」的可以对比后决定保留哪个。"
+        RowCategory.DONE -> "已移动、改名到影视库。点条目可重新刮削、打开所在文件夹，或改匹配后重新整理；" +
+            "整批可在右上角菜单「撤销上次整理」。"
+        RowCategory.EXCLUDED -> "你选择了不整理（包括预检里选「跳过」的），点「整理」时会跳过这些。" +
+            "点条目选「取消排除」，或长按多选后点「恢复」，可放回待处理。"
+        RowCategory.DELETED -> "源文件已在本应用里删除（预检「删除此文件」、对比后删除或文件管理里删除），这里只是记录。" +
+            "115 / 阿里云盘删除的可在网盘回收站找回；重新扫描后不再显示。"
+    }
+    Surface(
+        shape = RoundedCornerShape(10.dp), color = MaterialTheme.colorScheme.surfaceContainerLow,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+    ) {
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp))
     }
 }
 
