@@ -91,7 +91,36 @@ private class DoubanImpl(client: OkHttpClient?) : HttpSource(client) {
         try { block() } finally { last = System.currentTimeMillis() }
     }
 
+    /**
+     * 移动端搜索：和豆瓣 App「影视」一栏一样全（暗芝居能搜到 17 季）；
+     * 失败时退回联想搜索（只有前几条）
+     */
     override suspend fun search(query: String, tv: Boolean): List<TmdbSearchResult> {
+        val items = runCatching {
+            val q = URLEncoder.encode(query, "UTF-8")
+            JSONObject(paced {
+                get("https://m.douban.com/rexxar/api/v2/search/movie?q=$q&count=50", "User-Agent" to MOBILE_UA, "Referer" to "https://m.douban.com/")
+            }).optJSONArray("items").objects()
+        }.getOrNull()?.filter { it.optString("target_type") == "tv" || it.optString("target_type") == "movie" }
+            ?: return suggest(query, tv)
+        // 选的类型排前面，但都列出来，类型以选的为准
+        return items.sortedBy { (it.optString("target_type") == "tv") != tv }.mapNotNull { o ->
+            val t = o.optJSONObject("target") ?: return@mapNotNull null
+            val id = t.optString("id").toIntOrNull() ?: return@mapNotNull null
+            TmdbSearchResult(
+                id = id, type = if (tv) MediaType.TV else MediaType.MOVIE,
+                title = t.str("title") ?: "", originalTitle = null,
+                year = t.optString("year").toIntOrNull(),
+                overview = listOfNotNull(
+                    t.optJSONObject("rating")?.optDouble("value", 0.0)?.takeIf { it > 0 }?.let { "豆瓣 $it" },
+                    t.str("card_subtitle"),
+                ).joinToString(" · ").ifEmpty { null },
+                posterPath = t.str("cover_url"), backdropPath = null, popularity = 0.0, source = source,
+            )
+        }
+    }
+
+    private suspend fun suggest(query: String, tv: Boolean): List<TmdbSearchResult> {
         val list = JSONArray(paced {
             get("https://movie.douban.com/j/subject_suggest?q=" + URLEncoder.encode(query, "UTF-8"), "User-Agent" to DESKTOP_UA)
         }).objects().filter { it.optString("type") == "movie" }
