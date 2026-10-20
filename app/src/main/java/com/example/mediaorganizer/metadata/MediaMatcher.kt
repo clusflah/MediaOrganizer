@@ -22,7 +22,11 @@ data class MatchResult(
     val needsConfirm: Boolean get() = best == null || score < MediaMatcher.AUTO_ACCEPT
 }
 
-class MediaMatcher(private val tmdb: TmdbClient) {
+/**
+ * @param primary 设置里把主数据源改成豆瓣 / TheTVDB / Bangumi 时，按名字在那边搜；
+ *                路径里的 TMDB 标签仍按 TMDB 取
+ */
+class MediaMatcher(private val tmdb: TmdbClient, private val primary: MetadataSource? = null) {
 
     // 同一部剧几十集会反复搜同一个名字，缓存起来
     private val cache = ConcurrentHashMap<String, List<TmdbSearchResult>>()
@@ -65,7 +69,12 @@ class MediaMatcher(private val tmdb: TmdbClient) {
     private suspend fun search(isTv: Boolean, query: String, year: Int?): List<TmdbSearchResult> {
         val key = "$isTv|$query|$year"
         cache[key]?.let { return it }
-        val r = if (isTv) tmdb.searchTv(query, year) else tmdb.searchMovie(query, year)
+        val r = when {
+            // 其他来源的搜索不带年份，年份交给打分
+            primary != null -> if (year == null) primary.search(query, isTv) else emptyList()
+            isTv -> tmdb.searchTv(query, year)
+            else -> tmdb.searchMovie(query, year)
+        }
         cache[key] = r
         return r
     }

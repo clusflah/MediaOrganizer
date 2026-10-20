@@ -30,7 +30,9 @@ import com.example.mediaorganizer.scraper.ImageQuality
 import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeStrategy
 import com.example.mediaorganizer.scraper.ScrapeTemplate
+import com.example.mediaorganizer.metadata.MetaSource
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.settings.sourceMissing
 import com.example.mediaorganizer.storage.CleanupMode
 
 private val Accent: Color @Composable get() = LocalStatusColors.current.accent
@@ -416,7 +418,7 @@ fun ScrapeSettingsScreen(
     val c = settings.scrape
     fun update(n: ScrapeConfig) = onChange(settings.copy(scrape = n))
     // 默认只展开最需要处理的一组：没配 TMDB 时展开来源，否则展开文件生成
-    var open by rememberSaveable { mutableStateOf(setOf(if (settings.tmdbToken.isBlank()) "source" else "files")) }
+    var open by rememberSaveable { mutableStateOf(setOf(if (settings.sourceMissing() != null) "source" else "files")) }
     var showToken by remember { mutableStateOf(false) }
     var askReset by remember { mutableStateOf(false) }
     var previewTv by remember { mutableStateOf(true) }
@@ -443,14 +445,27 @@ fun ScrapeSettingsScreen(
             // ================= 1. 元数据来源 =================
             Group(
                 "元数据来源", expanded = "source" in open, onToggle = { toggleGroup("source") },
-                summary = (if (settings.tmdbToken.isBlank()) "TMDB 未配置" else "TMDB 已配置") +
+                summary = "主数据源 ${x.primary.label}" + (settings.sourceMissing()?.let { " · 未填 $it" } ?: "") +
                     listOfNotNull(
                         "豆瓣".takeIf { x.douban }, "Bangumi".takeIf { x.bangumi },
                         "TheTVDB".takeIf { x.tvdb }, "Fanart.tv".takeIf { x.fanart },
                     ).takeIf { it.isNotEmpty() }?.joinToString("、", prefix = " · 补充：").orEmpty(),
-                warn = settings.tmdbToken.isBlank(),
+                warn = settings.sourceMissing() != null,
             ) {
-                SubTitle("TMDB（识别影片用）")
+                SubTitle("主数据源")
+                Hint("扫描时自动识别用哪个站点；文件详情里搜索时也可以临时换别的来源。")
+                RadioOption("TMDB", x.primary == MetaSource.TMDB, recommended = true,
+                    desc = "资料最全，有 TMDB 标签和 clearlogo；需要令牌") { upX(x.copy(primary = MetaSource.TMDB)) }
+                RadioOption("豆瓣", x.primary == MetaSource.DOUBAN,
+                    desc = "中文名最准；没有分集标题和背景图，每季是单独条目，有频率限制扫描较慢") { upX(x.copy(primary = MetaSource.DOUBAN)) }
+                RadioOption("TheTVDB", x.primary == MetaSource.TVDB,
+                    desc = "剧集分集最全；需要在下面填 API key") { upX(x.copy(primary = MetaSource.TVDB)) }
+                RadioOption("Bangumi", x.primary == MetaSource.BANGUMI,
+                    desc = "动画最全；每季是单独条目") { upX(x.copy(primary = MetaSource.BANGUMI)) }
+                if (x.primary != MetaSource.TMDB) Hint("用其他来源识别时不加 TMDB 标签、没有 clearlogo；路径里已有的 TMDB 标签仍按 TMDB 识别。")
+
+                GroupDivider()
+                SubTitle(if (x.primary == MetaSource.TMDB) "TMDB（识别影片用）" else "TMDB（可选）")
                 OutlinedTextField(
                     value = settings.tmdbToken, onValueChange = { onChange(settings.copy(tmdbToken = it)) },
                     label = { Text("API 读访问令牌（eyJ 开头）") }, singleLine = true,
@@ -469,8 +484,8 @@ fun ScrapeSettingsScreen(
                 SwitchRow("Bangumi", x.bangumi, desc = "动画的中文简介和评分") { upX(x.copy(bangumi = it)) }
                 if (x.douban || x.bangumi) CheckOption("简介和评分优先用豆瓣 / Bangumi", x.preferDouban) { upX(x.copy(preferDouban = it)) }
                 SwitchRow("TheTVDB", x.tvdb, desc = "TVDB ID；填 key 后补全缺失的集标题和简介") { upX(x.copy(tvdb = it)) }
-                if (x.tvdb) {
-                    SettingField("TheTVDB API key（可选）", x.tvdbApiKey, password = true) { upX(x.copy(tvdbApiKey = it)) }
+                if (x.tvdb || x.primary == MetaSource.TVDB) {
+                    SettingField(if (x.primary == MetaSource.TVDB) "TheTVDB API key（必填）" else "TheTVDB API key（可选）", x.tvdbApiKey, password = true) { upX(x.copy(tvdbApiKey = it)) }
                     SettingField("订阅 PIN（个人 key 需要）", x.tvdbPin, password = true) { upX(x.copy(tvdbPin = it)) }
                 }
                 SwitchRow("Fanart.tv", x.fanart, desc = "高清 logo、clearart、横幅、光盘图") { upX(x.copy(fanart = it)) }

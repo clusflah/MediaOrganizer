@@ -223,6 +223,7 @@ object SettingsCodec {
         "${p}src.tvdbApiKey" to c.extra.tvdbApiKey,
         "${p}src.tvdbPin" to c.extra.tvdbPin,
         "${p}src.fanartApiKey" to c.extra.fanartApiKey,
+        "${p}src.primary" to c.extra.primary.name,
     )
 
     private fun decodeScrape(m: Map<String, String>, p: String, d: ScrapeConfig): ScrapeConfig {
@@ -250,6 +251,7 @@ object SettingsCodec {
                 tvdbApiKey = r.str("src.tvdbApiKey", d.extra.tvdbApiKey),
                 tvdbPin = r.str("src.tvdbPin", d.extra.tvdbPin),
                 fanartApiKey = r.str("src.fanartApiKey", d.extra.fanartApiKey),
+                primary = r.enum("src.primary", d.extra.primary),
             ),
         )
     }
@@ -260,4 +262,11 @@ object SettingsCodec {
         inline fun <reified E : Enum<E>> enum(k: String, d: E): E =
             m[prefix + k]?.let { v -> enumValues<E>().firstOrNull { it.name == v } } ?: d
     }
+}
+
+/** 主数据源缺的必填项（如「TMDB 令牌」），null 表示可以扫描识别 */
+fun AppSettings.sourceMissing(): String? = when (scrape.extra.primary) {
+    com.example.mediaorganizer.metadata.MetaSource.TMDB -> "TMDB 令牌".takeIf { tmdbToken.isBlank() }
+    com.example.mediaorganizer.metadata.MetaSource.TVDB -> "TheTVDB API key".takeIf { scrape.extra.tvdbApiKey.isBlank() }
+    else -> null
 }

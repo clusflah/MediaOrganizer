@@ -23,6 +23,7 @@ import com.example.mediaorganizer.metadata.extra.OnlineExtras
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.*
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.settings.sourceMissing
 import com.example.mediaorganizer.settings.LibraryProfile
 import com.example.mediaorganizer.settings.addLibrary
 import com.example.mediaorganizer.settings.allLibraries
@@ -421,7 +422,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     fun scan() = launchTask(Task.SCAN) {
         val s0 = settings
-        if (s0.tmdbToken.isBlank()) { status = "请先在「刮削设置」里填写 TMDB 令牌"; return@launchTask }
+        s0.sourceMissing()?.let { status = "请先在「刮削设置」里填写 $it"; return@launchTask }
         status = "连接中…"
         val s = try {
             newStorage().also { it.connect() }
@@ -440,7 +441,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
         var stopped = false
         try {
-            MediaScanner(s, MediaMatcher(t)).scan(s0.scanDir).collect { m ->
+            val primary = s0.scrape.extra.primary.takeIf { it != MetaSource.TMDB }?.let(::otherSource)
+            MediaScanner(s, MediaMatcher(t, primary)).scan(s0.scanDir).collect { m ->
                 rows += MediaRow(m, m.best, confirmed = !m.needsConfirm)
                 status = "已扫描 ${rows.size} 个视频…"
             }

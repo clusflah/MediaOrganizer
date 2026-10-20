@@ -30,6 +30,7 @@ data class ExtraConfig(
     val tvdbApiKey: String = "",
     val tvdbPin: String = "",
     val fanartApiKey: String = "",
+    val primary: MetaSource = MetaSource.TMDB,   // 主数据源：扫描时自动识别用哪个站点
 )
 
 /** Fanart.tv 的高清图，已选好语言（中文 > 英文 > 无文字） */

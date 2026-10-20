@@ -48,6 +48,7 @@ import com.example.mediaorganizer.metadata.TmdbSearchResult
 import com.example.mediaorganizer.parser.MediaNameParser
 import com.example.mediaorganizer.storage.RemoteFile
 import com.example.mediaorganizer.settings.AppSettings
+import com.example.mediaorganizer.settings.sourceMissing
 import com.example.mediaorganizer.settings.ThemeMode
 import com.example.mediaorganizer.storage.CleanupMode
 import com.example.mediaorganizer.storage.CleanupTarget
@@ -67,7 +68,7 @@ private val Gray: Color @Composable get() = LocalStatusColors.current.muted
 @Composable
 fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
     val s = vm.settings
-    var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.tmdbToken.isBlank()) }
+    var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.sourceMissing() != null) }
     var detailKey by remember { mutableStateOf<String?>(null) }
     var askUndo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -339,9 +340,9 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
                 PathLine("电影", s.movieRoot)
                 PathLine("剧集", s.tvRoot)
             }
-            if (s.tmdbToken.isBlank()) {
+            s.sourceMissing()?.let { missing ->
                 Text(
-                    "未填写 TMDB 令牌，无法识别影片 · 去设置",
+                    "未填写 $missing，无法识别影片 · 去设置",
                     color = Orange, style = MaterialTheme.typography.bodySmall,
                     modifier = Modifier.padding(top = 6.dp).clickable(onClick = openScrape),
                 )
@@ -1393,7 +1394,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
     val scope = rememberCoroutineScope()
     var query by remember(row.key) { mutableStateOf(p.title) }
     var tv by remember(row.key) { mutableStateOf(row.isTv) }
-    var searchSource by remember(row.key) { mutableStateOf(row.chosen?.source ?: MetaSource.TMDB) }
+    var searchSource by remember(row.key) { mutableStateOf(row.chosen?.source ?: vm.settings.scrape.extra.primary) }
     var results by remember(row.key) { mutableStateOf<List<TmdbSearchResult>?>(null) }
     var searching by remember { mutableStateOf(false) }
     var searchError by remember { mutableStateOf<String?>(null) }
