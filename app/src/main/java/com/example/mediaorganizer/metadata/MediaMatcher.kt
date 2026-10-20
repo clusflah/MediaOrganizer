@@ -237,7 +237,10 @@ class MediaScanner(
 
             val parsed = MediaNameParser.parse(fileName)
             if (parsed.isEpisode) {
-                return if (seasonFromDir != null && !EXPLICIT_SEASON.containsMatchIn(fileName)) parsed.copy(season = seasonFromDir) else parsed
+                if (seasonFromDir == null || EXPLICIT_SEASON.containsMatchIn(fileName)) return parsed
+                // 「[Yami Shibai 13][01]」在 Season13 文件夹里：片名末尾的 13 是季数，不是片名
+                val title = parsed.title.replace(Regex("""\s+0*$seasonFromDir$"""), "").ifEmpty { parsed.title }
+                return parsed.copy(title = title, season = seasonFromDir)
             }
 
             // 剧集分类 / 季文件夹里：「爱情怎么翻译 07.mp4」

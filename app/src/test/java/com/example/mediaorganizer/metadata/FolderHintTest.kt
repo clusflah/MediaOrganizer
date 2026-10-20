@@ -19,6 +19,14 @@ class FolderHintTest {
         assertEquals(Triple("老友记", 12, 1), se("第1集.mkv", "老友记", "第十二季"))
     }
 
+    @Test fun bracketEpisodeInSeasonFolder() {
+        val dirs = arrayOf("downloads", "影视", "电视剧", "暗芝居", "Season13")
+        assertEquals(Triple("Yami Shibai", 13, 1), se("[UHA-WINGS&YUI-7][Yami Shibai 13][01][x264 1080p][CHS](1).mp4", *dirs))
+        assertEquals(Triple("Yami Shibai", 13, 12), se("[UHA-WINGS&YUI-7][Yami Shibai 13][12][x264 1080p][CHS].mp4", *dirs))
+        // 不在季文件夹里：片名里的数字保留，集数照样认
+        assertEquals(Triple("Mob Psycho 100", 1, 5), se("[Group][Mob Psycho 100][05v2][1080p].mkv", "动漫"))
+    }
+
     @Test fun explicitSeasonInFileNameIsKept() {
         assertEquals(3, se("S03E02.mkv", "老友记", "S12(2024)").second)
         assertEquals(3, se("老友记.S03E02.mkv", "老友记", "Season 12").second)
