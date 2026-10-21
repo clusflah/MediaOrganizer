@@ -1387,6 +1387,14 @@ private fun sameMatch(a: TmdbSearchResult?, b: TmdbSearchResult?) =
 
 private fun TmdbSearchResult.idLabel() = "${source.label} $id"
 
+/** 条目在来源网站上的页面，用来对照海报、简介确认是不是这部 */
+private fun TmdbSearchResult.webUrl() = when (source) {
+    MetaSource.TMDB -> "https://www.themoviedb.org/${if (type == MediaType.TV) "tv" else "movie"}/$id"
+    MetaSource.DOUBAN -> "https://movie.douban.com/subject/$id/"
+    MetaSource.TVDB -> "https://thetvdb.com/dereferrer/${if (type == MediaType.TV) "series" else "movie"}/$id"
+    MetaSource.BANGUMI -> "https://bgm.tv/subject/$id"
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> Unit) {
@@ -1596,6 +1604,7 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                     }
                 }
                 if (canChange && !searching) items(options, key = { "${it.source}-${it.type}-${it.id}" }) { opt ->
+                    val context = androidx.compose.ui.platform.LocalContext.current
                     val isEffective = sameMatch(opt, effective)
                     Column(
                         Modifier.fillMaxWidth()
@@ -1605,11 +1614,23 @@ private fun RowDetailDialog(vm: MainViewModel, row: MediaRow, onDismiss: () -> U
                             .padding(horizontal = 8.dp, vertical = 8.dp),
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text("${opt.title} (${opt.year ?: "?"})", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
-                            if (isEffective) {
-                                Spacer(Modifier.width(6.dp))
-                                Pill(if (pickChanged) "已选" else "当前", if (pickChanged) MaterialTheme.colorScheme.primary else Gray)
+                            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                                Text("${opt.title} (${opt.year ?: "?"})", fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f, fill = false))
+                                if (isEffective) {
+                                    Spacer(Modifier.width(6.dp))
+                                    Pill(if (pickChanged) "已选" else "当前", if (pickChanged) MaterialTheme.colorScheme.primary else Gray)
+                                }
                             }
+                            // 跳到来源网站的条目页对照，不影响选中
+                            TextButton(
+                                onClick = {
+                                    runCatching {
+                                        context.startActivity(android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(opt.webUrl())))
+                                    }
+                                },
+                                contentPadding = PaddingValues(horizontal = 8.dp),
+                                modifier = Modifier.height(32.dp),
+                            ) { Text("查看 ↗", fontSize = 12.sp) }
                         }
                         Text(
                             listOfNotNull(if (opt.type == MediaType.TV) "剧集" else "电影", opt.originalTitle, opt.idLabel())
