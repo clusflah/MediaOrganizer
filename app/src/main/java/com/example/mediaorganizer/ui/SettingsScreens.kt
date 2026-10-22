@@ -792,11 +792,20 @@ private fun <T> OptionGrid(
     }
 }
 
+/** 设置输入框：浅色细边框、12dp 圆角；密码可以点眼睛图标显示，核对有没有输错 */
 @Composable
 fun SettingField(label: String, value: String, password: Boolean = false, onChange: (String) -> Unit) {
+    var shown by remember { mutableStateOf(false) }
     OutlinedTextField(
         value = value, onValueChange = onChange, label = { Text(label) }, singleLine = true,
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-        visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
+        modifier = Modifier.fillMaxWidth().padding(vertical = 3.dp),
+        shape = MaterialTheme.shapes.small,
+        colors = appFieldColors(),
+        visualTransformation = if (password && !shown) PasswordVisualTransformation() else VisualTransformation.None,
+        trailingIcon = if (!password) null else ({
+            IconButton(onClick = { shown = !shown }) {
+                Icon(if (shown) AppIcons.VisibilityOff else AppIcons.Visibility, contentDescription = if (shown) "隐藏密码" else "显示密码")
+            }
+        }),
     )
 }

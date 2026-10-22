@@ -20,6 +20,10 @@ import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -66,11 +70,14 @@ private val Gray: Color @Composable get() = LocalStatusColors.current.muted
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, openMusic: () -> Unit) {
+fun MainScreen(
+    vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit,
+    /** 「撤销上次整理」的确认框：菜单在首页共用的标题栏里，状态由首页传进来 */
+    askUndo: Boolean, onAskUndo: (Boolean) -> Unit,
+) {
     val s = vm.settings
     var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.sourceMissing() != null) }
     var detailKey by remember { mutableStateOf<String?>(null) }
-    var askUndo by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
@@ -88,17 +95,13 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
 
     fun showFilter(c: RowCategory?) {
         vm.filter = c
-        scope.launch { listState.animateScrollToItem(2) }
+        scope.launch { listState.animateScrollToItem(3) }     // 跳到筛选栏：前面是连接、目录、设置三张卡片
     }
 
     Scaffold(
-        topBar = {
-            if (selecting) SelectionBar(vm, visibleKeys = visible.map { it.key })
-            else TopAppBar(
-                title = { Text("影视整理") },
-                actions = { MainMenu(vm, openNaming, openScrape, openMusic, onUndo = { askUndo = true }) },
-            )
-        },
+        containerColor = MaterialTheme.colorScheme.background,
+        // 标题栏在首页（两页共用），这里只有多选时的操作栏
+        topBar = { if (selecting) SelectionBar(vm, visibleKeys = visible.map { it.key }) },
         bottomBar = {
             BottomBar(
                 vm, counts,
@@ -110,18 +113,13 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
         LazyColumn(
             Modifier.padding(padding).fillMaxSize(),
             state = listState,
-            contentPadding = PaddingValues(bottom = 16.dp),
+            contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp),
         ) {
             item(key = "conn") {
                 ConnectionCard(vm, expanded = editConn, onToggle = { editConn = !editConn }, openScrape = openScrape)
             }
-            item(key = "chips") {
-                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    AssistChip(onClick = openNaming, label = { Text("命名规则 · ${s.player}") })
-                    AssistChip(onClick = openScrape, label = { Text("刮削设置") })
-                    AssistChip(onClick = openMusic, label = { Text("音乐整理") })
-                }
-            }
+            item(key = "dirs") { DirectoryCard(vm) }
+            item(key = "links") { SettingsLinks(vm, openNaming, openScrape) }
 
             if (vm.rows.isEmpty() && vm.task != Task.SCAN) {
                 item(key = "empty") { EmptyState(vm) }
@@ -170,7 +168,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
         LeftoversDialog(found, vm.settings.cleanupMode, vm.settings.scanDir, onDelete = vm::deleteLeftovers, onDismiss = vm::dismissLeftovers)
     }
     if (askUndo) vm.undoSummary()?.let { sum ->
-        UndoConfirmDialog(sum, onConfirm = { askUndo = false; vm.undo() }, onDismiss = { askUndo = false })
+        UndoConfirmDialog(sum, onConfirm = { onAskUndo(false); vm.undo() }, onDismiss = { onAskUndo(false) })
     }
     vm.precheck?.let { pc ->
         PrecheckScreen(vm, pc, s, onOpenRow = { vm.dismissPrecheck(); detailKey = it })
@@ -180,7 +178,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
 // ============================ 顶栏 ============================
 
 @Composable
-private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, openMusic: () -> Unit, onUndo: () -> Unit) {
+internal fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, onUndo: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, contentDescription = "更多") }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -219,7 +217,6 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
         HorizontalDivider()
         DropdownMenuItem(text = { Text("命名规则") }, onClick = { go(openNaming) })
         DropdownMenuItem(text = { Text("刮削设置") }, onClick = { go(openScrape) })
-        DropdownMenuItem(text = { Text("音乐整理") }, onClick = { go(openMusic) })
         // 点一下切换到下一种，菜单不关，方便直接看效果
         val theme = vm.settings.themeMode
         DropdownMenuItem(
@@ -248,123 +245,110 @@ private fun SelectionBar(vm: MainViewModel, visibleKeys: List<String>) {
     )
 }
 
-// ============================ 媒体服务器卡片 ============================
+// ============================ 媒体库连接卡片 ============================
 
+/**
+ * 媒体库连接：平时只显示摘要（名称、连接状态、地址、最近测试），点「连接设置」才展开完整表单。
+ * 连上以后不用每次进来都面对整套配置；没配好时默认展开。
+ */
 @Composable
 private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () -> Unit, openScrape: () -> Unit) {
     val s = vm.settings
     fun up(n: AppSettings) = vm.updateSettings(n)
-    val host = s.storageType.label + " · " + StorageFactory.describe(s)
     val missing = StorageFactory.missing(s)
-    val (dot, title) = when {
-        missing != null -> Gray to "未配置 · $missing"
-        vm.task == Task.TEST -> Orange to "测试中…"
-        vm.connState == ConnState.OK -> Green to "已连接 · $host"
-        vm.connState == ConnState.FAIL -> Red to "连接失败 · " + vm.connMessage.ifEmpty { host }
-        else -> Gray to "尚未测试 · $host"
+    val st = LocalStatusColors.current
+    val (stateText, stateColor) = when {
+        missing != null -> "未配置" to st.muted
+        vm.task == Task.TEST -> "测试中" to st.warn
+        vm.connState == ConnState.OK -> "已连接" to st.ok
+        vm.connState == ConnState.FAIL -> "连接失败" to st.bad
+        else -> "未测试" to st.muted
     }
     var menu by remember { mutableStateOf(false) }
     var renaming by remember { mutableStateOf(false) }
     var askRemove by remember { mutableStateOf(false) }
 
-    ElevatedCard(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Column(Modifier.padding(16.dp)) {
-            // 第一行：媒体库切换 + 测试（不用展开就能点）+ 编辑
-            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) {
-                    Column(Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = true }.padding(end = 8.dp)) {
-                        Text("媒体库", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(s.libraryName, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                                modifier = Modifier.weight(1f, fill = false))
-                            Icon(Icons.Default.ArrowDropDown, contentDescription = "切换媒体库")
-                        }
-                    }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        vm.libraries.forEach { lib ->
-                            DropdownMenuItem(
-                                leadingIcon = { if (lib.id == s.activeLibrary) Icon(Icons.Default.Check, null) else Spacer(Modifier.size(24.dp)) },
-                                text = {
-                                    Column {
-                                        Text(lib.name)
-                                        Text(
-                                            lib.storageType.label + when (lib.lastTestOk) { true -> " · 已连接"; false -> " · 连接失败"; null -> "" },
-                                            style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
-                                        )
-                                    }
-                                },
-                                enabled = !vm.busy,
-                                onClick = { menu = false; vm.switchLibrary(lib.id) },
-                            )
-                        }
-                        HorizontalDivider()
-                        DropdownMenuItem(text = { Text("添加媒体库") }, enabled = !vm.busy,
-                            onClick = { menu = false; vm.addLibrary(); if (!expanded) onToggle() })
-                        DropdownMenuItem(text = { Text("重命名当前媒体库") }, onClick = { menu = false; renaming = true })
-                        if (vm.libraries.size > 1) DropdownMenuItem(
-                            text = { Text("删除当前媒体库", color = Red) }, enabled = !vm.busy,
-                            onClick = { menu = false; askRemove = true },
+    SectionCard {
+        // 标题行：媒体库名称（点开切换）+ 状态标签
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.weight(1f)) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = true }.padding(vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(s.libraryName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold,
+                        maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
+                    Icon(Icons.Default.ArrowDropDown, contentDescription = "切换媒体库", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    vm.libraries.forEach { lib ->
+                        DropdownMenuItem(
+                            leadingIcon = { if (lib.id == s.activeLibrary) Icon(Icons.Default.Check, null) else Spacer(Modifier.size(24.dp)) },
+                            text = {
+                                Column {
+                                    Text(lib.name)
+                                    Text(
+                                        lib.storageType.label + when (lib.lastTestOk) { true -> " · 已连接"; false -> " · 连接失败"; null -> "" },
+                                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline,
+                                    )
+                                }
+                            },
+                            enabled = !vm.busy,
+                            onClick = { menu = false; vm.switchLibrary(lib.id) },
                         )
                     }
+                    HorizontalDivider()
+                    DropdownMenuItem(text = { Text("添加媒体库") }, enabled = !vm.busy,
+                        onClick = { menu = false; vm.addLibrary(); if (!expanded) onToggle() })
+                    DropdownMenuItem(text = { Text("重命名当前媒体库") }, onClick = { menu = false; renaming = true })
+                    if (vm.libraries.size > 1) DropdownMenuItem(
+                        text = { Text("删除当前媒体库", color = Red) }, enabled = !vm.busy,
+                        onClick = { menu = false; askRemove = true },
+                    )
                 }
-                OutlinedButton(
-                    onClick = vm::testConnection, enabled = !vm.busy && missing == null,
-                    contentPadding = PaddingValues(horizontal = 14.dp),
-                ) {
-                    if (vm.task == Task.TEST) {
-                        CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(6.dp))
-                    }
-                    Text("测试")
-                }
-                TextButton(onClick = onToggle) { Text(if (expanded) "收起" else "编辑") }
             }
+            StatusBadge(stateText, stateColor, loading = vm.task == Task.TEST)
+        }
 
-            // 状态：服务器、连接状态、最近测试时间；失败时一句话原因
-            Row(Modifier.padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.size(8.dp).clip(CircleShape).background(dot))
-                Spacer(Modifier.width(8.dp))
-                Text(
-                    title, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    color = if (vm.connState == ConnState.FAIL && missing == null) Red else MaterialTheme.colorScheme.onSurface,
-                )
-            }
-            if (s.lastTestAt > 0 && missing == null) Text(
-                "最近测试 " + formatTime(s.lastTestAt),
-                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
-                modifier = Modifier.padding(start = 16.dp),
+        // 摘要：类型 · 地址；失败时一句话原因
+        Text(
+            s.storageType.label + (if (missing == null) " · " + StorageFactory.describe(s) else " · 还缺 $missing"),
+            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 4.dp),
+        )
+        if (vm.connState == ConnState.FAIL && missing == null && vm.connMessage.isNotEmpty()) Text(
+            vm.connMessage, style = MaterialTheme.typography.bodySmall, color = Red, maxLines = 2, overflow = TextOverflow.Ellipsis,
+        )
+        vm.connChecks.forEach { ConnCheckRow(it) }
+        s.sourceMissing()?.let { m ->
+            Text(
+                "未填写 $m，无法识别影片 · 去设置",
+                color = Orange, style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier.padding(top = 6.dp).clickable(onClick = openScrape),
             )
-            vm.connChecks.forEach { ConnCheckRow(it) }
+        }
 
-            if (!expanded) {
-                Spacer(Modifier.height(8.dp))
-                PathLine("扫描", s.scanDir)
-                PathLine("电影", s.movieRoot)
-                PathLine("剧集", s.tvRoot)
+        // 操作行：最近测试时间作为辅助文字在左，「重新测试」「连接设置」是轻量的文字按钮
+        Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                if (s.lastTestAt > 0 && missing == null) "最近测试 · " + formatTime(s.lastTestAt) else "",
+                style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.weight(1f),
+            )
+            if (!expanded) TextButton(onClick = vm::testConnection, enabled = !vm.busy && missing == null) {
+                Text(if (vm.connState == ConnState.UNTESTED) "测试连接" else "重新测试")
             }
-            s.sourceMissing()?.let { missing ->
-                Text(
-                    "未填写 $missing，无法识别影片 · 去设置",
-                    color = Orange, style = MaterialTheme.typography.bodySmall,
-                    modifier = Modifier.padding(top = 6.dp).clickable(onClick = openScrape),
-                )
+            TextButton(onClick = onToggle) {
+                Text(if (expanded) "收起" else "连接设置")
+                Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, Modifier.size(18.dp))
             }
-            if (expanded) {
-                Spacer(Modifier.height(8.dp))
-                StorageFields(vm, s, ::up)
-                Text(
-                    "下面的目录都是这个媒体库里的路径" + if (s.storageType == StorageType.LOCAL) "（相对所选文件夹，/ 就是它本身）" else "",
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.outline,
-                    modifier = Modifier.padding(top = 8.dp),
-                )
-                // 连上后可以直接浏览媒体库来选文件夹，也可以手动输入
-                val canBrowse = missing == null
-                DirField(MainViewModel.DirSetting.SCAN, s.scanDir, canBrowse, vm::openDirPicker) { up(s.copy(scanDir = it)) }
-                DirField(MainViewModel.DirSetting.MOVIE, s.movieRoot, canBrowse, vm::openDirPicker) { up(s.copy(movieRoot = it)) }
-                DirField(MainViewModel.DirSetting.TV, s.tvRoot, canBrowse, vm::openDirPicker) { up(s.copy(tvRoot = it)) }
-                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.End) {
-                    TextButton(onClick = onToggle) { Text("完成") }
-                }
+        }
+
+        if (expanded) {
+            HorizontalDivider(Modifier.padding(vertical = 8.dp), color = MaterialTheme.colorScheme.outlineVariant)
+            StorageFields(vm, s, ::up)
+            Row(Modifier.fillMaxWidth().padding(top = 10.dp), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
+                OutlinedButton(onClick = vm::testConnection, enabled = !vm.busy && missing == null) { Text("测试连接") }
+                FilledTonalButton(onClick = onToggle) { Text("保存并收起") }
             }
         }
     }
@@ -388,6 +372,119 @@ private fun ConnectionCard(vm: MainViewModel, expanded: Boolean, onToggle: () ->
     )
 }
 
+/** 状态标签：小圆点 + 文字，颜色之外还有文字说明 */
+@Composable
+internal fun StatusBadge(text: String, color: Color, loading: Boolean = false) {
+    Row(
+        Modifier.clip(RoundedCornerShape(50)).background(color.copy(alpha = 0.12f)).padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (loading) CircularProgressIndicator(Modifier.size(10.dp), strokeWidth = 1.5.dp, color = color)
+        else Box(Modifier.size(7.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(6.dp))
+        Text(text, style = MaterialTheme.typography.labelMedium, color = color, fontWeight = FontWeight.Medium)
+    }
+}
+
+// ============================ 媒体目录 ============================
+
+/** 扫描来源和整理目标分开写清楚：来源是要整理的下载目录，目标是整理后放进去的库 */
+@Composable
+private fun DirectoryCard(vm: MainViewModel) {
+    val s = vm.settings
+    val canBrowse = StorageFactory.missing(s) == null
+    SectionCard {
+        SectionTitle("媒体目录", "从哪里找视频、整理到哪里" + if (s.storageType == StorageType.LOCAL) "（相对所选文件夹，/ 就是它本身）" else "")
+        Text("扫描来源", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+        DirRow(MainViewModel.DirSetting.SCAN, s.scanDir, AppIcons.FolderOpen, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(scanDir = it)) }
+        Text("整理目标", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(top = 10.dp))
+        DirRow(MainViewModel.DirSetting.MOVIE, s.movieRoot, AppIcons.Movie, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(movieRoot = it)) }
+        DirRow(MainViewModel.DirSetting.TV, s.tvRoot, AppIcons.Tv, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(tvRoot = it)) }
+    }
+}
+
+/**
+ * 一个目录：图标 + 名称 + 单行路径（长路径截断，不撑高）。点整行在媒体库里选文件夹，
+ * 右边的笔可以手动输入；还没连上媒体库时点整行也是手动输入。
+ */
+@Composable
+internal fun DirRow(
+    field: MainViewModel.DirSetting, value: String, icon: androidx.compose.ui.graphics.vector.ImageVector, canBrowse: Boolean,
+    onBrowse: (MainViewModel.DirSetting) -> Unit, onChange: (String) -> Unit,
+) {
+    var editing by remember { mutableStateOf(false) }
+    Row(
+        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small)
+            .clickable { if (canBrowse) onBrowse(field) else editing = true }
+            .padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(36.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(20.dp)) }
+        Column(Modifier.weight(1f).padding(start = 12.dp)) {
+            Text(field.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Medium)
+            Text(
+                value.ifBlank { "未设置，点这里选择" }, style = MaterialTheme.typography.bodySmall,
+                color = if (value.isBlank()) Orange else MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        IconButton(onClick = { editing = true }) {
+            Icon(Icons.Default.Edit, contentDescription = "手动输入${field.label}", tint = MaterialTheme.colorScheme.outline, modifier = Modifier.size(20.dp))
+        }
+    }
+    if (editing) {
+        var text by remember { mutableStateOf(value) }
+        AlertDialog(
+            onDismissRequest = { editing = false },
+            title = { Text(field.label) },
+            text = {
+                OutlinedTextField(
+                    value = text, onValueChange = { text = it }, singleLine = true, label = { Text("路径") },
+                    shape = MaterialTheme.shapes.small, colors = appFieldColors(),
+                )
+            },
+            confirmButton = { TextButton(onClick = { onChange(text.trim()); editing = false }) { Text("保存") } },
+            dismissButton = {
+                Row {
+                    if (canBrowse) TextButton(onClick = { editing = false; onBrowse(field) }) { Text("浏览…") }
+                    TextButton(onClick = { editing = false }) { Text("取消") }
+                }
+            },
+        )
+    }
+}
+
+// ============================ 设置入口 ============================
+
+/** 命名规则、刮削设置：图标 + 标题 + 一句说明的紧凑列表，不和主操作抢视线 */
+@Composable
+private fun SettingsLinks(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
+    SectionCard {
+        SettingLink(AppIcons.Tune, "命名规则 · ${vm.settings.player}", "整理文件时使用的命名规范", openNaming)
+        HorizontalDivider(Modifier.padding(start = 48.dp), color = MaterialTheme.colorScheme.outlineVariant)
+        SettingLink(AppIcons.Image, "刮削设置", "元数据来源、海报与 NFO", openScrape)
+    }
+}
+
+@Composable
+internal fun SettingLink(icon: androidx.compose.ui.graphics.vector.ImageVector, title: String, subtitle: String, onClick: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable(onClick = onClick).padding(vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+        Column(Modifier.weight(1f).padding(start = 26.dp)) {
+            Text(title, style = MaterialTheme.typography.bodyLarge)
+            Text(subtitle, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, null, tint = MaterialTheme.colorScheme.outline)
+    }
+}
+
 /** 媒体库类型选择 + 该类型的连接参数 */
 @OptIn(ExperimentalLayoutApi::class, ExperimentalMaterial3Api::class)
 @Composable
@@ -408,9 +505,24 @@ private fun StorageFields(vm: MainViewModel, s: AppSettings, up: (AppSettings) -
         }
     }
 
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        StorageType.entries.filter { it.ready }.forEach { t ->
-            FilterChip(selected = s.storageType == t, onClick = { up(s.copy(storageType = t)) }, label = { Text(t.label) })
+    // 存储类型：一个下拉框代替一排描边按钮，选中的一目了然
+    var typeMenu by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(expanded = typeMenu, onExpandedChange = { typeMenu = it }) {
+        OutlinedTextField(
+            value = s.storageType.label, onValueChange = {}, readOnly = true, singleLine = true,
+            label = { Text("存储类型") },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = typeMenu) },
+            shape = MaterialTheme.shapes.small, colors = appFieldColors(),
+            modifier = Modifier.menuAnchor(MenuAnchorType.PrimaryNotEditable).fillMaxWidth().padding(vertical = 3.dp),
+        )
+        ExposedDropdownMenu(expanded = typeMenu, onDismissRequest = { typeMenu = false }) {
+            StorageType.entries.filter { it.ready }.forEach { t ->
+                DropdownMenuItem(
+                    text = { Text(t.label) },
+                    leadingIcon = { if (s.storageType == t) Icon(Icons.Default.Check, null) else Spacer(Modifier.size(24.dp)) },
+                    onClick = { typeMenu = false; up(s.copy(storageType = t)) },
+                )
+            }
         }
     }
     when (s.storageType) {
@@ -521,14 +633,6 @@ private fun saveToGallery(context: android.content.Context, png: ByteArray): Boo
 }.getOrDefault(false)
 
 @Composable
-private fun PathLine(label: String, path: String) {
-    Row(Modifier.padding(vertical = 1.dp)) {
-        Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, modifier = Modifier.width(36.dp))
-        Text(path.ifBlank { "未填写" }, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
 private fun ConnCheckRow(c: ConnCheck) {
     val (mark, color) = when (c.level) {
         ConnCheck.Level.OK -> "✓" to Green
@@ -544,24 +648,63 @@ private fun ConnCheckRow(c: ConnCheck) {
 
 // ============================ 空状态 / 统计 / 筛选 ============================
 
+/**
+ * 还没扫描时：图标 + 一句话说明能做什么 + 开始前的两项检查（媒体库连上没有、扫描哪个目录），
+ * 主按钮「开始扫描」在底栏，随时够得着。
+ */
 @Composable
 private fun EmptyState(vm: MainViewModel) {
+    val s = vm.settings
+    val st = LocalStatusColors.current
     Column(
-        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 48.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 32.dp, vertical = 28.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text("还没有扫描结果", style = MaterialTheme.typography.titleMedium)
-        Spacer(Modifier.height(8.dp))
+        Box(
+            Modifier.size(72.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
+            contentAlignment = Alignment.Center,
+        ) { Icon(AppIcons.Movie, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(34.dp)) }
+        Spacer(Modifier.height(16.dp))
+        Text("准备整理你的媒体库", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
         Text(
-            "点「扫描」查找 ${vm.settings.scanDir.ifBlank { "扫描目录" }} 里的视频。" +
-                "识别结果会先列出来给你核对，确认后才会移动和改名。",
+            "扫描目录里的视频，识别影片后先列出来给你核对，确认后才会移动、改名并刮削元数据。",
             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant,
             textAlign = TextAlign.Center,
         )
+        Spacer(Modifier.height(16.dp))
+        val connected = vm.connState == ConnState.OK
+        val missing = StorageFactory.missing(s)
+        Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            CheckLine(
+                ok = connected,
+                text = when {
+                    missing != null -> "媒体库还没配置：$missing"
+                    connected -> "媒体库已连接"
+                    vm.connState == ConnState.FAIL -> "媒体库连接失败，先检查连接设置"
+                    else -> "媒体库还没测试连接（扫描时会自动连接）"
+                },
+                color = if (connected) st.ok else if (vm.connState == ConnState.FAIL || missing != null) st.bad else st.muted,
+            )
+            CheckLine(
+                ok = s.scanDir.isNotBlank(),
+                text = if (s.scanDir.isBlank()) "还没设置扫描目录" else "扫描 ${s.scanDir}",
+                color = if (s.scanDir.isBlank()) st.warn else st.ok,
+            )
+        }
         if (vm.status.isNotEmpty()) {
             Spacer(Modifier.height(12.dp))
             Text(vm.status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline, textAlign = TextAlign.Center)
         }
+    }
+}
+
+@Composable
+private fun CheckLine(ok: Boolean, text: String, color: Color) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(if (ok) "✓" else "•", color = color, fontWeight = FontWeight.Bold, modifier = Modifier.width(20.dp), textAlign = TextAlign.Center)
+        Text(text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -783,7 +926,11 @@ private fun BottomBar(
                         }
                     }
                 } else if (vm.rows.isEmpty()) {
-                    Button(onClick = vm::scan, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().height(48.dp)) { Text("扫描") }
+                    Button(onClick = vm::scan, enabled = !vm.busy, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+                        Icon(Icons.Default.Search, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("开始扫描", fontWeight = FontWeight.SemiBold)
+                    }
                 } else {
                     val pending = counts[RowCategory.PENDING] ?: 0
                     val unmatched = counts[RowCategory.UNMATCHED] ?: 0
@@ -821,18 +968,6 @@ private fun BottomBar(
 
 private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几千条撑爆页面
 
-/** 目录设置：可手动输入，也可点「浏览」在媒体库里选 */
-@Composable
-internal fun DirField(
-    field: MainViewModel.DirSetting, value: String, canBrowse: Boolean,
-    onBrowse: (MainViewModel.DirSetting) -> Unit, onChange: (String) -> Unit,
-) {
-    OutlinedTextField(
-        value = value, onValueChange = onChange, label = { Text(field.label) }, singleLine = true,
-        trailingIcon = { TextButton(onClick = { onBrowse(field) }, enabled = canBrowse) { Text("浏览") } },
-        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
-    )
-}
 
 internal fun sizeText(bytes: Long?): String = when {
     bytes == null || bytes <= 0 -> ""

@@ -8,7 +8,9 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.ui.draw.clip
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -37,9 +39,9 @@ import kotlinx.coroutines.launch
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
-fun MusicScreen(vm: MainViewModel, onBack: () -> Unit) {
+fun MusicScreen(vm: MainViewModel) {
     val s = vm.settings
-    var showSettings by rememberSaveable { mutableStateOf(vm.musicRows.isEmpty()) }
+    var showSettings by rememberSaveable { mutableStateOf(false) }
     var filter by rememberSaveable { mutableStateOf<RowCategory?>(null) }
     var detailKey by remember { mutableStateOf<String?>(null) }
     val counts by remember { derivedStateOf { vm.musicRows.groupingBy { it.category }.eachCount() } }
@@ -50,20 +52,15 @@ fun MusicScreen(vm: MainViewModel, onBack: () -> Unit) {
         }
     }
 
+    // 标题栏和「影视 / 音乐」标签在首页，两页共用
     Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("音乐整理") },
-                navigationIcon = { IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "返回") } },
-            )
-        },
+        containerColor = MaterialTheme.colorScheme.background,
         bottomBar = { MusicBottomBar(vm, counts) },
     ) { padding ->
-        LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp)) {
+        LazyColumn(Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(top = 6.dp, bottom = 16.dp)) {
+            item(key = "dirs") { MusicDirCard(vm) }
             item(key = "settings") {
-                Box(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                    MusicSettingsCard(vm, expanded = showSettings, onToggle = { showSettings = !showSettings })
-                }
+                MusicSettingsCard(vm, expanded = showSettings, onToggle = { showSettings = !showSettings })
             }
             if (vm.musicStatus.isNotEmpty()) item(key = "status") {
                 Text(
@@ -124,54 +121,67 @@ private fun categoryColor(c: RowCategory): Color {
 
 // ============================ 设置 ============================
 
+/** 音乐目录：和影视页一样，扫描来源和整理目标分开写；点一行在媒体库里选文件夹 */
+@Composable
+private fun MusicDirCard(vm: MainViewModel) {
+    val s = vm.settings
+    val canBrowse = StorageFactory.missing(s) == null && !vm.busy
+    SectionCard {
+        SectionTitle("音乐目录", "整理成「音乐库/艺人/专辑 (年份)/01 - 歌名」，Plex、Jellyfin、Emby、Kodi 都能直接识别")
+        Text("扫描来源", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline)
+        DirRow(MainViewModel.DirSetting.MUSIC_SCAN, s.musicScanDir, AppIcons.FolderOpen, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(musicScanDir = it)) }
+        Text("整理目标", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.outline,
+            modifier = Modifier.padding(top = 10.dp))
+        DirRow(MainViewModel.DirSetting.MUSIC, s.musicRoot, AppIcons.MusicNote, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(musicRoot = it)) }
+    }
+}
+
+/** 刮削选项：开关比较多，默认收起，只显示一行摘要 */
 @Composable
 private fun MusicSettingsCard(vm: MainViewModel, expanded: Boolean, onToggle: () -> Unit) {
     val s = vm.settings
     val m = s.music
     fun up(c: MusicConfig) = vm.updateSettings(s.copy(music = c))
-    Surface(shape = MaterialTheme.shapes.medium, tonalElevation = 1.dp, modifier = Modifier.fillMaxWidth()) {
-        Column {
-            Row(
-                Modifier.fillMaxWidth().clickable(onClick = onToggle).padding(horizontal = 16.dp, vertical = 14.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("目录与刮削", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold)
-                    if (!expanded) Text(
-                        "${s.musicScanDir} → ${s.musicRoot}", style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.outline, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                Text(if (expanded) "收起" else "展开", color = MaterialTheme.colorScheme.primary, fontSize = 14.sp)
-            }
-            if (!expanded) return@Column
-            Column(Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp)) {
-                val canBrowse = StorageFactory.missing(s) == null && !vm.busy
-                DirField(MainViewModel.DirSetting.MUSIC_SCAN, s.musicScanDir, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(musicScanDir = it)) }
-                DirField(MainViewModel.DirSetting.MUSIC, s.musicRoot, canBrowse, vm::openDirPicker) { vm.updateSettings(s.copy(musicRoot = it)) }
-                Hint("整理成「音乐库/艺人/专辑 (年份)/01 - 歌名」，Plex、Jellyfin、Emby、Kodi 都能直接识别")
-
-                Spacer(Modifier.height(8.dp))
-                SwitchRow("读取歌曲标签", m.readTags, "WebDAV、SMB、本机文件夹只读文件开头一小段；网盘按文件名识别") { up(m.copy(readTags = it)) }
-                SwitchRow("iTunes 补充", m.itunes, "MusicBrainz 搜不到的专辑、缺少的封面从 iTunes 找") { up(m.copy(itunes = it)) }
-                if (m.itunes) OutlinedTextField(
-                    value = m.itunesCountry, onValueChange = { v -> up(m.copy(itunesCountry = v.uppercase().filter { it.isLetter() }.take(2))) },
-                    label = { Text("iTunes 商店地区（CN / US / JP …）") }, singleLine = true,
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+    SectionCard {
+        Row(
+            Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable(onClick = onToggle).padding(vertical = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(AppIcons.Tune, null, tint = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.size(22.dp))
+            Column(Modifier.weight(1f).padding(start = 16.dp)) {
+                Text("刮削选项", style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    listOfNotNull(
+                        "封面".takeIf { m.cover }, "NFO".takeIf { m.albumNfo || m.artistNfo }, "歌词".takeIf { m.lyrics },
+                        "iTunes 补充".takeIf { m.itunes },
+                    ).joinToString(" · ").ifEmpty { "都没开" },
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                SwitchRow("专辑封面", m.cover, "cover.jpg，来自 Cover Art Archive") { up(m.copy(cover = it)) }
-                if (m.cover) SwitchRow("同时写 folder.jpg", m.folderJpg, "Windows 资源管理器、Infuse 用的文件夹封面") { up(m.copy(folderJpg = it)) }
-                SwitchRow("album.nfo", m.albumNfo, "专辑名、厂牌、流派、曲目表和 MusicBrainz ID") { up(m.copy(albumNfo = it)) }
-                SwitchRow("artist.nfo", m.artistNfo, "艺人类型、地区、成立 / 出生年份") { up(m.copy(artistNfo = it)) }
-                SwitchRow("歌词", m.lyrics, "LRCLIB 逐行同步歌词，保存为与歌曲同名的 .lrc；已有歌词的不覆盖") { up(m.copy(lyrics = it)) }
-                if (m.lyrics) SwitchRow("没有同步歌词时写普通歌词", m.plainLyrics, "保存为 .txt") { up(m.copy(plainLyrics = it)) }
-                SwitchRow("多碟专辑分文件夹", m.discFolders, if (m.discFolders) "Disc 1/01 - 歌名" else "1-01 - 歌名") { up(m.copy(discFolders = it)) }
-                Hint("「整理后自动刮削」「已有文件的处理方式」「整理后清理原文件夹」和影视共用刮削设置。" +
-                    "封面、歌词版权归原作者，公开分发前请核对各数据源的使用条款。")
             }
+            Icon(if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null, tint = MaterialTheme.colorScheme.outline)
         }
+        if (!expanded) return@SectionCard
+        Spacer(Modifier.height(8.dp))
+        SwitchRow("读取歌曲标签", m.readTags, "WebDAV、SMB、本机文件夹只读文件开头一小段；网盘按文件名识别") { up(m.copy(readTags = it)) }
+        SwitchRow("iTunes 补充", m.itunes, "MusicBrainz 搜不到的专辑、缺少的封面从 iTunes 找") { up(m.copy(itunes = it)) }
+        if (m.itunes) OutlinedTextField(
+            value = m.itunesCountry, onValueChange = { v -> up(m.copy(itunesCountry = v.uppercase().filter { it.isLetter() }.take(2))) },
+            label = { Text("iTunes 商店地区（CN / US / JP …）") }, singleLine = true,
+            shape = MaterialTheme.shapes.small, colors = appFieldColors(),
+            modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        )
+        SwitchRow("专辑封面", m.cover, "cover.jpg，来自 Cover Art Archive") { up(m.copy(cover = it)) }
+        if (m.cover) SwitchRow("同时写 folder.jpg", m.folderJpg, "Windows 资源管理器、Infuse 用的文件夹封面") { up(m.copy(folderJpg = it)) }
+        SwitchRow("album.nfo", m.albumNfo, "专辑名、厂牌、流派、曲目表和 MusicBrainz ID") { up(m.copy(albumNfo = it)) }
+        SwitchRow("artist.nfo", m.artistNfo, "艺人类型、地区、成立 / 出生年份") { up(m.copy(artistNfo = it)) }
+        SwitchRow("歌词", m.lyrics, "LRCLIB 逐行同步歌词，保存为与歌曲同名的 .lrc；已有歌词的不覆盖") { up(m.copy(lyrics = it)) }
+        if (m.lyrics) SwitchRow("没有同步歌词时写普通歌词", m.plainLyrics, "保存为 .txt") { up(m.copy(plainLyrics = it)) }
+        SwitchRow("多碟专辑分文件夹", m.discFolders, if (m.discFolders) "Disc 1/01 - 歌名" else "1-01 - 歌名") { up(m.copy(discFolders = it)) }
+        Hint("「整理后自动刮削」「已有文件的处理方式」「整理后清理原文件夹」和影视共用刮削设置。" +
+            "封面、歌词版权归原作者，公开分发前请核对各数据源的使用条款。")
     }
 }
+
 
 // ============================ 列表 ============================
 

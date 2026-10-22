@@ -51,8 +51,7 @@ import com.example.mediaorganizer.storage.normalizePath
 import com.example.mediaorganizer.storage.parentPath
 import com.example.mediaorganizer.ui.AppTheme
 import com.example.mediaorganizer.ui.FileBrowserScreen
-import com.example.mediaorganizer.ui.MainScreen
-import com.example.mediaorganizer.ui.MusicScreen
+import com.example.mediaorganizer.ui.HomePager
 import com.example.mediaorganizer.music.*
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
@@ -79,7 +78,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Page { MAIN, NAMING, SCRAPE, MUSIC }
+enum class Page { MAIN, NAMING, SCRAPE }
 
 @Composable
 fun AppRoot(vm: MainViewModel = viewModel()) {
@@ -105,8 +104,8 @@ private fun AppPages(vm: MainViewModel) {
 @Composable
 private fun Pages(vm: MainViewModel, page: Page, setPage: (Page) -> Unit) {
     when (page) {
-        Page.MAIN -> MainScreen(vm, openNaming = { setPage(Page.NAMING) }, openScrape = { setPage(Page.SCRAPE) }, openMusic = { setPage(Page.MUSIC) })
-        Page.MUSIC -> MusicScreen(vm) { setPage(Page.MAIN) }
+        // 影视、音乐整理并列在首页，左右滑动切换
+        Page.MAIN -> HomePager(vm, openNaming = { setPage(Page.NAMING) }, openScrape = { setPage(Page.SCRAPE) })
         Page.NAMING -> NamingSettingsScreen(vm.settings, vm.saved, vm::updateSettings) { setPage(Page.MAIN); vm.refreshPreviewAsync() }
         Page.SCRAPE -> ScrapeSettingsScreen(
             vm.settings, vm.saved, vm::updateSettings,
