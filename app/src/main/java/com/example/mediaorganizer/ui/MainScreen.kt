@@ -170,8 +170,9 @@ fun MainScreen(
     if (askUndo) vm.undoSummary()?.let { sum ->
         UndoConfirmDialog(sum, onConfirm = { onAskUndo(false); vm.undo() }, onDismiss = { onAskUndo(false) })
     }
-    vm.precheck?.let { pc ->
-        PrecheckScreen(vm, pc, s, onOpenRow = { vm.dismissPrecheck(); detailKey = it })
+    // 预检页在最外层显示（见 AppPages），从那里点某个文件时在这里打开它的详情
+    LaunchedEffect(vm.openDetail) {
+        vm.openDetail?.let { detailKey = it; vm.openDetail = null }
     }
 }
 
@@ -1003,7 +1004,7 @@ private fun buildTree(videos: List<String>, generated: List<String>, newDirs: Se
 /** 整理前预检：概览 / 问题（逐项选择处理方式）/ 整理后目录树 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun PrecheckScreen(
+internal fun PrecheckScreen(
     vm: MainViewModel, pc: MainViewModel.PrecheckState, s: AppSettings,
     onOpenRow: (String) -> Unit,
 ) {
