@@ -54,6 +54,7 @@ import com.example.mediaorganizer.ui.FileBrowserScreen
 import com.example.mediaorganizer.ui.HomePager
 import com.example.mediaorganizer.music.*
 import com.example.mediaorganizer.ui.NamingSettingsScreen
+import com.example.mediaorganizer.ui.PrecheckScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
@@ -96,6 +97,10 @@ private fun AppPages(vm: MainViewModel) {
     }
     Box(Modifier.fillMaxSize()) {
         Pages(vm, page) { page = it }
+        // 整理前预检：放在最外层盖住整个屏幕。放在影视页里时，左右滑动的分页容器不会把它叠在列表上面，点「整理」看起来没反应
+        vm.precheck?.let { pc ->
+            PrecheckScreen(vm, pc, vm.settings, onOpenRow = { key -> vm.dismissPrecheck(); vm.openDetail = key })
+        }
         // 文件管理盖在当前页上（下面的列表位置、筛选都保留），关掉回到原来的地方
         vm.browse?.let { Surface(Modifier.fillMaxSize()) { FileBrowserScreen(vm, it) } }
     }
@@ -794,6 +799,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissPrecheck() { precheck = null }
+
+    /** 从预检页点某个文件：影视页据此打开它的详情 */
+    var openDetail by mutableStateOf<String?>(null)
 
     /** 用 TMDB 详情（整理计划时已缓存）算出会写哪些 NFO / 图片，不联网下载 */
     private suspend fun scrapePreview(plans: List<RenamePlan>): Pair<List<String>, Boolean> {
