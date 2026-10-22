@@ -1,5 +1,6 @@
 package com.example.mediaorganizer.storage
 
+import com.example.mediaorganizer.music.AudioTagReader
 import com.example.mediaorganizer.parser.MediaNameParser
 
 /** 整理后怎么处理视频原来所在的文件夹 */
@@ -120,7 +121,7 @@ class SourceCleaner(
             } else {
                 if (isSystemJunk(f.name)) continue
                 if (isDownloading(f.name)) return Verdict.Keep("${f.name} 还在下载")
-                if (mode == CleanupMode.LEFTOVERS && !isVideo(f)) { files += f.name; continue }
+                if (mode == CleanupMode.LEFTOVERS && !isVideo(f) && !isAudio(f)) { files += f.name; continue }
                 return Verdict.Keep("还有 ${f.name}")
             }
         }
@@ -140,6 +141,9 @@ class SourceCleaner(
                 name == "#recycle" || name.startsWith("._")
 
         fun isDownloading(name: String) = name.substringAfterLast('.', "").lowercase() in DOWNLOADING_EXT
+
+        /** 音乐和视频一样算内容：电影和专辑放在同一个下载目录时，不能把专辑当残留删掉 */
+        fun isAudio(f: RemoteFile) = f.name.substringAfterLast('.', "").lowercase() in AudioTagReader.AUDIO_EXTENSIONS
 
         /** 正片视频；文件名带 sample 的样片不算 */
         fun isVideo(f: RemoteFile): Boolean {

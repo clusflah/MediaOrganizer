@@ -30,6 +30,8 @@ data class LibraryProfile(
     val scanDir: String = "/下载",
     val movieRoot: String = "/影视库/电影",
     val tvRoot: String = "/影视库/剧集",
+    val musicScanDir: String = "/下载",
+    val musicRoot: String = "/音乐库",
     val lastTestAt: Long = 0,
     val lastTestOk: Boolean? = null,       // null = 没测过
     val lastTestMsg: String = "",
@@ -42,7 +44,7 @@ fun AppSettings.snapshot(id: String = activeLibrary, name: String = libraryName)
     smbHost = smbHost, smbShare = smbShare, smbUser = smbUser, smbPassword = smbPassword, smbDomain = smbDomain,
     localTreeUri = localTreeUri, pan115Cookie = pan115Cookie,
     aliClientId = aliClientId, aliClientSecret = aliClientSecret, aliRefreshToken = aliRefreshToken, aliResourceDrive = aliResourceDrive,
-    scanDir = scanDir, movieRoot = movieRoot, tvRoot = tvRoot,
+    scanDir = scanDir, movieRoot = movieRoot, tvRoot = tvRoot, musicScanDir = musicScanDir, musicRoot = musicRoot,
     lastTestAt = lastTestAt, lastTestOk = lastTestOk, lastTestMsg = lastTestMsg,
 )
 
@@ -53,7 +55,7 @@ fun AppSettings.applyProfile(p: LibraryProfile) = copy(
     smbHost = p.smbHost, smbShare = p.smbShare, smbUser = p.smbUser, smbPassword = p.smbPassword, smbDomain = p.smbDomain,
     localTreeUri = p.localTreeUri, pan115Cookie = p.pan115Cookie,
     aliClientId = p.aliClientId, aliClientSecret = p.aliClientSecret, aliRefreshToken = p.aliRefreshToken, aliResourceDrive = p.aliResourceDrive,
-    scanDir = p.scanDir, movieRoot = p.movieRoot, tvRoot = p.tvRoot,
+    scanDir = p.scanDir, movieRoot = p.movieRoot, tvRoot = p.tvRoot, musicScanDir = p.musicScanDir, musicRoot = p.musicRoot,
     lastTestAt = p.lastTestAt, lastTestOk = p.lastTestOk, lastTestMsg = p.lastTestMsg,
 )
 
@@ -95,6 +97,7 @@ object LibraryCodec {
                 .put("aliClientId", p.aliClientId).put("aliClientSecret", p.aliClientSecret)
                 .put("aliRefreshToken", p.aliRefreshToken).put("aliResourceDrive", p.aliResourceDrive)
                 .put("scanDir", p.scanDir).put("movieRoot", p.movieRoot).put("tvRoot", p.tvRoot)
+                .put("musicScanDir", p.musicScanDir).put("musicRoot", p.musicRoot)
                 .put("lastTestAt", p.lastTestAt).put("lastTestOk", p.lastTestOk?.toString() ?: "")
                 .put("lastTestMsg", p.lastTestMsg))
         }
@@ -119,6 +122,7 @@ object LibraryCodec {
                     aliRefreshToken = o.optString("aliRefreshToken"), aliResourceDrive = o.optBoolean("aliResourceDrive", true),
                     scanDir = o.optString("scanDir", d.scanDir), movieRoot = o.optString("movieRoot", d.movieRoot),
                     tvRoot = o.optString("tvRoot", d.tvRoot),
+                    musicScanDir = o.optString("musicScanDir", d.musicScanDir), musicRoot = o.optString("musicRoot", d.musicRoot),
                     lastTestAt = o.optLong("lastTestAt"),
                     lastTestOk = o.optString("lastTestOk").toBooleanStrictOrNull(),
                     lastTestMsg = o.optString("lastTestMsg"),

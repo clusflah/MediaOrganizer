@@ -52,6 +52,8 @@ import com.example.mediaorganizer.storage.parentPath
 import com.example.mediaorganizer.ui.AppTheme
 import com.example.mediaorganizer.ui.FileBrowserScreen
 import com.example.mediaorganizer.ui.MainScreen
+import com.example.mediaorganizer.ui.MusicScreen
+import com.example.mediaorganizer.music.*
 import com.example.mediaorganizer.ui.NamingSettingsScreen
 import com.example.mediaorganizer.ui.ScrapeSettingsScreen
 import kotlinx.coroutines.CancellationException
@@ -77,7 +79,7 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Page { MAIN, NAMING, SCRAPE }
+enum class Page { MAIN, NAMING, SCRAPE, MUSIC }
 
 @Composable
 fun AppRoot(vm: MainViewModel = viewModel()) {
@@ -103,7 +105,8 @@ private fun AppPages(vm: MainViewModel) {
 @Composable
 private fun Pages(vm: MainViewModel, page: Page, setPage: (Page) -> Unit) {
     when (page) {
-        Page.MAIN -> MainScreen(vm, openNaming = { setPage(Page.NAMING) }, openScrape = { setPage(Page.SCRAPE) })
+        Page.MAIN -> MainScreen(vm, openNaming = { setPage(Page.NAMING) }, openScrape = { setPage(Page.SCRAPE) }, openMusic = { setPage(Page.MUSIC) })
+        Page.MUSIC -> MusicScreen(vm) { setPage(Page.MAIN) }
         Page.NAMING -> NamingSettingsScreen(vm.settings, vm.saved, vm::updateSettings) { setPage(Page.MAIN); vm.refreshPreviewAsync() }
         Page.SCRAPE -> ScrapeSettingsScreen(
             vm.settings, vm.saved, vm::updateSettings,
@@ -152,6 +155,26 @@ data class MediaRow(
 }
 
 const val DELETED_OUTCOME = "已删除"
+
+/** 音乐页的一行：一张专辑或一首单曲 */
+data class MusicRow(
+    val match: AlbumMatch,
+    val confirmed: Boolean,
+    val excluded: Boolean = false,
+    val outcome: String? = null,     // null=未整理, "ok", 或错误信息
+    val plan: AlbumPlan? = null,     // 整理后的实际位置（只含移动成功的歌），刮削用
+) {
+    val key: String get() = match.group.key
+
+    val category: RowCategory get() = when {
+        outcome == "ok" -> RowCategory.DONE
+        outcome != null -> RowCategory.FAILED
+        excluded -> RowCategory.EXCLUDED
+        match.release == null -> RowCategory.UNMATCHED
+        !confirmed -> RowCategory.PENDING
+        else -> RowCategory.READY
+    }
+}
 
 /** 连接测试的一项结果 */
 data class ConnCheck(val label: String, val level: Level, val detail: String) {
@@ -285,6 +308,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         if (busy) return
         updateSettings(new)
         rows.clear()
+        musicRows.clear()
         selected = emptySet()
         details = null
         connChecks = emptyList()
@@ -401,7 +425,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         canUndo = undoSummary() != null
     }
 
-    private fun launchTask(t: Task, block: suspend () -> Unit) {
+    /** report：出错信息显示在哪（影视页 / 音乐页各有自己的状态行） */
+    private fun launchTask(t: Task, report: (String) -> Unit = { status = it }, block: suspend () -> Unit) {
         if (task != null) return
         task = t
         progress = null
@@ -411,7 +436,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                status = "出错：${e.message ?: e.javaClass.simpleName}"
+                report("出错：${e.message ?: e.javaClass.simpleName}")
             } finally {
                 task = null; progress = null; taskJob = null
             }
@@ -920,7 +945,9 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     // ---------- 文件管理 ----------
 
     /** 可以用文件夹浏览来选的三个目录设置 */
-    enum class DirSetting(val label: String) { SCAN("扫描目录"), MOVIE("电影库目录"), TV("剧集库目录") }
+    enum class DirSetting(val label: String) {
+        SCAN("扫描目录"), MOVIE("电影库目录"), TV("剧集库目录"), MUSIC_SCAN("音乐扫描目录"), MUSIC("音乐库目录"),
+    }
 
     /**
      * 正在浏览的文件夹；非 null 时显示文件管理页。highlight = 打开时要标出的文件名；
@@ -939,6 +966,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             DirSetting.SCAN -> settings.scanDir
             DirSetting.MOVIE -> settings.movieRoot
             DirSetting.TV -> settings.tvRoot
+            DirSetting.MUSIC_SCAN -> settings.musicScanDir
+            DirSetting.MUSIC -> settings.musicRoot
         }
         browse = BrowseRequest(normalizePath(cur), pick = field)
     }
@@ -949,6 +978,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             DirSetting.SCAN -> settings.copy(scanDir = d)
             DirSetting.MOVIE -> settings.copy(movieRoot = d)
             DirSetting.TV -> settings.copy(tvRoot = d)
+            DirSetting.MUSIC_SCAN -> settings.copy(musicScanDir = d)
+            DirSetting.MUSIC -> settings.copy(musicRoot = d)
         })
         closeBrowser()
     }
@@ -1139,6 +1170,165 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
     }
 
+    // ---------- 音乐 ----------
+
+    val musicRows = mutableStateListOf<MusicRow>()
+    var musicStatus by mutableStateOf("")
+    private var musicMatcher: MusicMatcher? = null
+    private val musicBrainz by lazy { MusicBrainzClient() }
+
+    private fun itunes() = settings.music.takeIf { it.itunes }?.let { ItunesClient(country = it.itunesCountry) }
+    private fun matcherForMusic() = musicMatcher ?: MusicMatcher(musicBrainz, itunes()).also { musicMatcher = it }
+
+    private fun launchMusic(t: Task, block: suspend () -> Unit) = launchTask(t, report = { musicStatus = it }, block = block)
+
+    fun musicScan() = launchMusic(Task.SCAN) {
+        val s0 = settings
+        musicStatus = "连接中…"
+        val s = try {
+            newStorage().also { it.connect() }
+        } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            recordConn(false, connErrorText(e))
+            musicStatus = "连接失败：$connMessage"
+            return@launchMusic
+        }
+        recordConn(true)
+        storage = s
+        musicRows.clear()
+        musicMatcher = null                  // 设置里可能改了 iTunes 开关 / 地区
+
+        var stopped = false
+        var firstError: String? = null
+        var songs = 0
+        try {
+            val groups = MusicScanner(s, s0.music.readTags).scan(s0.musicScanDir) { n -> musicStatus = "已找到 $n 首歌…" }
+            songs = groups.sumOf { it.files.size }
+            val matcher = matcherForMusic()
+            for ((i, g) in groups.withIndex()) {
+                progress = i to groups.size
+                musicStatus = "识别中 ${i + 1}/${groups.size}：${g.label}"
+                val m = try {
+                    matcher.match(g)
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    firstError = firstError ?: (e.message ?: e.javaClass.simpleName)
+                    AlbumMatch(g, null, 0.0, emptyList(), g.files.map { TrackMatch(it, null) })
+                }
+                musicRows += MusicRow(m, confirmed = !m.needsConfirm)
+            }
+        } catch (e: CancellationException) {
+            stopped = true
+        }
+        val pending = musicRows.count { it.category == RowCategory.PENDING || it.category == RowCategory.UNMATCHED }
+        musicStatus = (if (stopped) "已停止，" else "") + "共 ${musicRows.size} 张专辑 / 单曲（$songs 首）" +
+            (if (pending > 0) "，$pending 个待确认" else "") +
+            (firstError?.let { "；部分识别出错：$it" } ?: "")
+    }
+
+    private val MBID = Regex("""(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}""")
+
+    /** 手动搜索；直接粘贴 MusicBrainz 专辑链接或 ID 也行 */
+    suspend fun musicSearch(album: String, artist: String?): List<ReleaseCandidate> {
+        val m = matcherForMusic()
+        MBID.find(album)?.let { id -> return listOf(m.load(MusicSource.MUSICBRAINZ, id.value).candidate()) }
+        return m.search(album.trim(), artist?.trim()?.ifEmpty { null })
+    }
+
+    fun musicChoose(key: String, c: ReleaseCandidate) = launchMusic(Task.MATCH) {
+        val i = musicRows.indexOfFirst { it.key == key }.takeIf { it >= 0 } ?: return@launchMusic
+        val row = musicRows[i]
+        musicStatus = "读取「${c.title}」的曲目…"
+        val alts = listOfNotNull(row.match.release?.candidate()) + row.match.alternatives
+        musicRows[i] = row.copy(match = matcherForMusic().rematch(row.match.group, c, alts), confirmed = true)
+        musicStatus = "已改为「${c.title}」"
+    }
+
+    fun musicConfirm(keys: Set<String>) {
+        for (i in musicRows.indices) if (musicRows[i].key in keys && musicRows[i].match.release != null)
+            musicRows[i] = musicRows[i].copy(confirmed = true)
+    }
+
+    fun musicSetExcluded(keys: Set<String>, excluded: Boolean) {
+        for (i in musicRows.indices) if (musicRows[i].key in keys && musicRows[i].outcome == null)
+            musicRows[i] = musicRows[i].copy(excluded = excluded)
+    }
+
+    fun musicPreview(row: MusicRow): AlbumPlan? = row.plan ?: MusicPlanner.plan(row.match, settings.musicRoot, settings.music)
+
+    fun musicOrganize(only: Set<String>? = null) = launchMusic(Task.ORGANIZE) {
+        val s = storage ?: return@launchMusic
+        val cfg = settings.music
+        val plans = musicRows.withIndex()
+            .filter { it.value.category == RowCategory.READY && (only == null || it.value.key in only) }
+            .mapNotNull { iv -> MusicPlanner.plan(iv.value.match, settings.musicRoot, cfg)?.let { iv to it } }
+        if (plans.isEmpty()) { musicStatus = "没有可整理的专辑（待确认的先点「确认」）"; return@launchMusic }
+        val moves = plans.flatMap { (_, p) -> p.tracks.map { it.move } }
+        val (outcomes, ops) = RenameExecutor(s, storageId).executeMoves(moves, MusicPlanner.COMPANIONS) { d, t, _ ->
+            progress = d to t
+            musicStatus = "整理中 $d/$t"
+        }
+        rememberOps(ops, append = false)
+
+        var k = 0
+        var failedSongs = 0
+        val toScrape = mutableListOf<AlbumPlan>()
+        val movedFrom = mutableListOf<String>()
+        for ((iv, plan) in plans) {
+            val os = outcomes.subList(k, k + plan.tracks.size)
+            k += plan.tracks.size
+            val ok = plan.tracks.zip(os).filter { it.second.error == null }
+            ok.filter { !it.second.skipped }.forEach { movedFrom += parentPath(it.first.song.file.path) }
+            val failed = os.filter { it.error != null }
+            failedSongs += failed.size
+            val done = plan.copy(tracks = ok.map { it.first })
+            musicRows[iv.index] = iv.value.copy(
+                outcome = if (failed.isEmpty()) "ok" else "${failed.size} 首失败：${failed.first().error}",
+                plan = done,
+            )
+            if (done.tracks.isNotEmpty()) toScrape += done
+        }
+        musicStatus = "整理完成：${moves.size - failedSongs} 首" + if (failedSongs > 0) "，失败 $failedSongs 首" else ""
+
+        // 原文件夹里没有歌和视频了才删（cue、log、旧封面一起删）
+        if (settings.cleanupMode != CleanupMode.OFF && movedFrom.isNotEmpty()) {
+            val protect = listOf(settings.musicRoot, settings.movieRoot, settings.tvRoot) + plans.map { it.second.albumDir }
+            val c = SourceCleaner(s, settings.cleanupMode, settings.musicScanDir, protect).cleanAfterMove(movedFrom)
+            if (c.removed.isNotEmpty()) musicStatus += "；清理原文件夹 ${c.removed.size} 个"
+        }
+        if (settings.autoScrape && toScrape.isNotEmpty()) {
+            task = Task.SCRAPE
+            runMusicScrape(s, toScrape, prefix = "$musicStatus；")
+        }
+    }
+
+    /** 已整理的按整理后的位置刮削；还没整理的就地刮削（文件不动） */
+    fun musicScrape(only: Set<String>? = null) = launchMusic(Task.SCRAPE) {
+        val s = storage ?: return@launchMusic
+        val plans = musicRows.filter { only == null || it.key in only }.mapNotNull { r ->
+            when (r.category) {
+                RowCategory.DONE, RowCategory.FAILED -> r.plan
+                RowCategory.READY -> MusicPlanner.plan(r.match, settings.musicRoot, settings.music, inPlace = true)
+                else -> null
+            }
+        }
+        if (plans.isEmpty()) { musicStatus = "没有可刮削的专辑"; return@launchMusic }
+        runMusicScrape(s, plans)
+    }
+
+    private suspend fun runMusicScrape(s: StorageProvider, plans: List<AlbumPlan>, prefix: String = "") {
+        progress = null
+        val report = MusicScraper(s, storageId, musicBrainz, itunes(), LrclibClient())
+            .scrape(plans, settings.music, settings.scrape.strategy) { stage, d, t ->
+                progress = d to t
+                musicStatus = "$prefix$stage $d/$t"
+            }
+        rememberOps(report.operations, append = true)
+        musicStatus = "${prefix}刮削：写入 ${report.written}，跳过 ${report.skipped}" +
+            if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
+    }
+
     /** 没有移动 / 新写入任何文件的批次不算可撤销（只有建目录之类的记录） */
     fun undoSummary(): UndoSummary? {
         val ops = lastOps.takeIf { it.isNotEmpty() } ?: return null
@@ -1165,6 +1355,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val r = RenameExecutor(s, storageId).rollback(ops)
         rememberOps(emptyList(), append = false)
         for (i in rows.indices) rows[i] = rows[i].copy(outcome = null)
+        for (i in musicRows.indices) musicRows[i] = musicRows[i].copy(outcome = null, plan = null)
         if (details != null) refreshPreview(all = true)
         status = buildString {
             append(if (r.failed == 0) "已全部撤销" else "撤销完成，${r.failed} 项失败（${r.errors.first()}）")

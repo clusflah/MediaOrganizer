@@ -165,6 +165,11 @@ class LocalStorage(context: Context, treeUri: String) : StorageProvider {
         Unit
     }
 
+    override suspend fun readHead(file: RemoteFile, length: Int): ByteArray? = io {
+        val id = resolve(file.path) ?: throw StorageException(404, "路径不存在：${file.path}")
+        resolver.openInputStream(docUri(id))?.use { readUpTo(it, length) }
+    }
+
     override suspend fun delete(file: RemoteFile) = io {
         val id = resolve(file.path) ?: return@io
         DocumentsContract.deleteDocument(resolver, docUri(id))

@@ -1,6 +1,7 @@
 package com.example.mediaorganizer.settings
 
 import com.example.mediaorganizer.metadata.extra.ExtraConfig
+import com.example.mediaorganizer.music.MusicConfig
 import com.example.mediaorganizer.naming.*
 import com.example.mediaorganizer.scraper.ScrapeConfig
 import com.example.mediaorganizer.scraper.ScrapeTemplate
@@ -45,6 +46,8 @@ data class AppSettings(
     val scanDir: String = "/下载",
     val movieRoot: String = "/影视库/电影",
     val tvRoot: String = "/影视库/剧集",
+    val musicScanDir: String = "/下载",
+    val musicRoot: String = "/音乐库",
     // 命名
     val player: String = "Plex",
     val movieNaming: NamingConfig = PlayerPresets.PLEX,
@@ -52,6 +55,8 @@ data class AppSettings(
     // 刮削
     val scrape: ScrapeConfig = ScrapeConfig(),
     val autoScrape: Boolean = true,
+    // 音乐
+    val music: MusicConfig = MusicConfig(),
     // 整理后
     val cleanupMode: CleanupMode = CleanupMode.LEFTOVERS,
     // 外观
@@ -95,6 +100,8 @@ object SettingsCodec {
         put("scanDir", s.scanDir)
         put("movieRoot", s.movieRoot)
         put("tvRoot", s.tvRoot)
+        put("musicScanDir", s.musicScanDir)
+        put("musicRoot", s.musicRoot)
         put("player", s.player)
         put("autoScrape", s.autoScrape.toString())
         put("cleanupMode", s.cleanupMode.name)
@@ -102,6 +109,7 @@ object SettingsCodec {
         putAll(encodeNaming(s.movieNaming, "movie."))
         putAll(encodeNaming(s.tvNaming, "tv."))
         putAll(encodeScrape(s.scrape, "scrape."))
+        putAll(encodeMusic(s.music, "music."))
     }
 
     fun decode(m: Map<String, String>): AppSettings {
@@ -135,6 +143,8 @@ object SettingsCodec {
             scanDir = r.str("scanDir", d.scanDir),
             movieRoot = r.str("movieRoot", d.movieRoot),
             tvRoot = r.str("tvRoot", d.tvRoot),
+            musicScanDir = r.str("musicScanDir", d.musicScanDir),
+            musicRoot = r.str("musicRoot", d.musicRoot),
             player = r.str("player", d.player),
             autoScrape = r.bool("autoScrape", d.autoScrape),
             cleanupMode = r.enum("cleanupMode", d.cleanupMode),
@@ -142,6 +152,7 @@ object SettingsCodec {
             movieNaming = decodeNaming(m, "movie.", d.movieNaming),
             tvNaming = decodeNaming(m, "tv.", d.tvNaming),
             scrape = decodeScrape(m, "scrape.", d.scrape),
+            music = decodeMusic(m, "music.", d.music),
         )
     }
 
@@ -253,6 +264,38 @@ object SettingsCodec {
                 fanartApiKey = r.str("src.fanartApiKey", d.extra.fanartApiKey),
                 primary = r.enum("src.primary", d.extra.primary),
             ),
+        )
+    }
+
+    // ---------- 音乐 ----------
+
+    private fun encodeMusic(c: MusicConfig, p: String) = mapOf(
+        "${p}readTags" to c.readTags.toString(),
+        "${p}itunes" to c.itunes.toString(),
+        "${p}itunesCountry" to c.itunesCountry,
+        "${p}cover" to c.cover.toString(),
+        "${p}folderJpg" to c.folderJpg.toString(),
+        "${p}albumNfo" to c.albumNfo.toString(),
+        "${p}artistNfo" to c.artistNfo.toString(),
+        "${p}lyrics" to c.lyrics.toString(),
+        "${p}plainLyrics" to c.plainLyrics.toString(),
+        "${p}discFolders" to c.discFolders.toString(),
+    )
+
+    private fun decodeMusic(m: Map<String, String>, p: String, d: MusicConfig): MusicConfig {
+        val r = Reader(m, p)
+        return MusicConfig(
+            readTags = r.bool("readTags", d.readTags),
+            itunes = r.bool("itunes", d.itunes),
+            itunesCountry = r.str("itunesCountry", d.itunesCountry).trim().uppercase()
+                .takeIf { it.matches(Regex("[A-Z]{2}")) } ?: d.itunesCountry,
+            cover = r.bool("cover", d.cover),
+            folderJpg = r.bool("folderJpg", d.folderJpg),
+            albumNfo = r.bool("albumNfo", d.albumNfo),
+            artistNfo = r.bool("artistNfo", d.artistNfo),
+            lyrics = r.bool("lyrics", d.lyrics),
+            plainLyrics = r.bool("plainLyrics", d.plainLyrics),
+            discFolders = r.bool("discFolders", d.discFolders),
         )
     }
 

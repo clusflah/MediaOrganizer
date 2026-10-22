@@ -64,7 +64,8 @@ interface ScrapeSource {
 
 sealed interface Content {
     data class Text(val text: String) : Content
-    data class Image(val url: String) : Content
+    /** fallbacks：前一个下载失败（如 404）时依次尝试 */
+    data class Image(val url: String, val fallbacks: List<String> = emptyList()) : Content
 }
 
 data class OutputFile(val path: String, val content: Content)
@@ -99,42 +100,8 @@ class Scraper(
                 .onFailure { errors += "${plan.targetName}：${it.message}" }
         }
 
-        // 2. 每个目录列一次：「仅刮削缺少文件」据此跳过；同时区分新建/覆盖，
-        //    撤销时只删除新建的，不会误删用户原有的 NFO 和图片
-        val existing = HashMap<String, Set<String>>()
-        for (dir in outputs.keys.map(::parentPath).distinct()) {
-            existing[dir] = runCatching { storage.list(dir).map { it.name }.toSet() }.getOrDefault(emptySet())
-        }
-        val ops = mutableListOf<FileOperation>()
-
-        // 3. 下载 + 上传
-        var written = 0
-        var skipped = 0
-        val imageCache = HashMap<String, ByteArray>()   // 同一张图写多份（poster.jpg + folder.jpg）只下载一次
-        for ((i, entry) in outputs.entries.withIndex()) {
-            val (path, content) = entry
-            val alreadyThere = existing[parentPath(path)]?.contains(path.substringAfterLast('/')) == true
-            val keep = when (config.strategy) {
-                ScrapeStrategy.OVERWRITE -> false
-                ScrapeStrategy.UPDATE_NFO -> content is Content.Image
-                ScrapeStrategy.ONLY_MISSING -> true
-            }
-            if (alreadyThere && keep) {
-                skipped++
-            } else {
-                runCatching {
-                    val bytes = when (content) {
-                        is Content.Text -> content.text.toByteArray(Charsets.UTF_8)
-                        is Content.Image -> imageCache.getOrPut(content.url) { source.download(content.url) }
-                    }
-                    storage.upload(path, ByteArrayInputStream(bytes), bytes.size.toLong())
-                    written++
-                    if (!alreadyThere) ops += FileOperation(storageId, FileOperation.Type.UPLOAD, "", path)
-                }.onFailure { errors += "${path.substringAfterLast('/')}：${it.message}" }
-            }
-            onProgress(i + 1, outputs.size)
-        }
-        return ScrapeReport(written, skipped, errors, ops)
+        val r = writeOutputs(storage, outputs, config.strategy, storageId, source::download, onProgress)
+        return r.copy(errors = errors + r.errors)
     }
 
     /** 根据模板算出一个视频需要哪些附属文件 */
@@ -237,6 +204,63 @@ class Scraper(
     companion object {
         val GENERIC_EP = Regex("""第\s*\d+\s*集|Episode \d+""")
     }
+}
+
+/**
+ * 把汇总好的文件写到存储（影视、音乐刮削共用）。
+ * 每个目录列一次：「仅刮削缺少文件」据此跳过；同时区分新建/覆盖，
+ * 撤销时只删除新建的，不会误删用户原有的 NFO 和图片。
+ */
+suspend fun writeOutputs(
+    storage: StorageProvider,
+    outputs: Map<String, Content>,
+    strategy: ScrapeStrategy,
+    storageId: String,
+    download: suspend (String) -> ByteArray,
+    onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
+): ScrapeReport {
+    val errors = mutableListOf<String>()
+    val existing = HashMap<String, Set<String>>()
+    for (dir in outputs.keys.map(::parentPath).distinct()) {
+        existing[dir] = runCatching { storage.list(dir).map { it.name }.toSet() }.getOrDefault(emptySet())
+    }
+    val ops = mutableListOf<FileOperation>()
+
+    var written = 0
+    var skipped = 0
+    val imageCache = HashMap<String, ByteArray>()   // 同一张图写多份（poster.jpg + folder.jpg）只下载一次
+    suspend fun image(c: Content.Image): ByteArray {
+        var last: Throwable? = null
+        for (url in listOf(c.url) + c.fallbacks) {
+            imageCache[url]?.let { return it }
+            runCatching { download(url) }.onSuccess { imageCache[url] = it; return it }.onFailure { last = it }
+        }
+        throw last ?: IllegalStateException("没有可用的图片")
+    }
+    for ((i, entry) in outputs.entries.withIndex()) {
+        val (path, content) = entry
+        val alreadyThere = existing[parentPath(path)]?.contains(path.substringAfterLast('/')) == true
+        val keep = when (strategy) {
+            ScrapeStrategy.OVERWRITE -> false
+            ScrapeStrategy.UPDATE_NFO -> content is Content.Image
+            ScrapeStrategy.ONLY_MISSING -> true
+        }
+        if (alreadyThere && keep) {
+            skipped++
+        } else {
+            runCatching {
+                val bytes = when (content) {
+                    is Content.Text -> content.text.toByteArray(Charsets.UTF_8)
+                    is Content.Image -> image(content)
+                }
+                storage.upload(path, ByteArrayInputStream(bytes), bytes.size.toLong())
+                written++
+                if (!alreadyThere) ops += FileOperation(storageId, FileOperation.Type.UPLOAD, "", path)
+            }.onFailure { errors += "${path.substringAfterLast('/')}：${it.message}" }
+        }
+        onProgress(i + 1, outputs.size)
+    }
+    return ScrapeReport(written, skipped, errors, ops)
 }
 
 // ============================ NFO（Kodi 格式，Emby/Jellyfin/Infuse 通用） ============================

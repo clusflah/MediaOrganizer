@@ -66,7 +66,7 @@ private val Gray: Color @Composable get() = LocalStatusColors.current.muted
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit) {
+fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, openMusic: () -> Unit) {
     val s = vm.settings
     var editConn by rememberSaveable { mutableStateOf(StorageFactory.missing(s) != null || s.sourceMissing() != null) }
     var detailKey by remember { mutableStateOf<String?>(null) }
@@ -96,7 +96,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
             if (selecting) SelectionBar(vm, visibleKeys = visible.map { it.key })
             else TopAppBar(
                 title = { Text("影视整理") },
-                actions = { MainMenu(vm, openNaming, openScrape, onUndo = { askUndo = true }) },
+                actions = { MainMenu(vm, openNaming, openScrape, openMusic, onUndo = { askUndo = true }) },
             )
         },
         bottomBar = {
@@ -116,9 +116,10 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
                 ConnectionCard(vm, expanded = editConn, onToggle = { editConn = !editConn }, openScrape = openScrape)
             }
             item(key = "chips") {
-                Row(Modifier.padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(Modifier.horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     AssistChip(onClick = openNaming, label = { Text("命名规则 · ${s.player}") })
                     AssistChip(onClick = openScrape, label = { Text("刮削设置") })
+                    AssistChip(onClick = openMusic, label = { Text("音乐整理") })
                 }
             }
 
@@ -179,7 +180,7 @@ fun MainScreen(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit
 // ============================ 顶栏 ============================
 
 @Composable
-private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, onUndo: () -> Unit) {
+private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -> Unit, openMusic: () -> Unit, onUndo: () -> Unit) {
     var open by remember { mutableStateOf(false) }
     IconButton(onClick = { open = true }) { Icon(Icons.Default.MoreVert, contentDescription = "更多") }
     DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -218,6 +219,7 @@ private fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () -
         HorizontalDivider()
         DropdownMenuItem(text = { Text("命名规则") }, onClick = { go(openNaming) })
         DropdownMenuItem(text = { Text("刮削设置") }, onClick = { go(openScrape) })
+        DropdownMenuItem(text = { Text("音乐整理") }, onClick = { go(openMusic) })
         // 点一下切换到下一种，菜单不关，方便直接看效果
         val theme = vm.settings.themeMode
         DropdownMenuItem(
@@ -821,7 +823,7 @@ private const val LIST_LIMIT = 200   // 每组最多列这么多条，避免几�
 
 /** 目录设置：可手动输入，也可点「浏览」在媒体库里选 */
 @Composable
-private fun DirField(
+internal fun DirField(
     field: MainViewModel.DirSetting, value: String, canBrowse: Boolean,
     onBrowse: (MainViewModel.DirSetting) -> Unit, onChange: (String) -> Unit,
 ) {

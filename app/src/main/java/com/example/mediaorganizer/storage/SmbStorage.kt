@@ -197,6 +197,17 @@ class SmbStorage(
         }
     }
 
+    override suspend fun readHead(file: RemoteFile, length: Int): ByteArray? = io { d ->
+        d.openFile(
+            smb(file.path),
+            EnumSet.of(AccessMask.GENERIC_READ),
+            null,
+            EnumSet.of(SMB2ShareAccess.FILE_SHARE_READ),
+            SMB2CreateDisposition.FILE_OPEN,
+            EnumSet.of(SMB2CreateOptions.FILE_NON_DIRECTORY_FILE),
+        ).use { f -> f.inputStream.use { readUpTo(it, length) } }
+    }
+
     override suspend fun delete(file: RemoteFile) = io { d ->
         val p = smb(file.path)
         if (file.isDirectory) d.rmdir(p, true) else d.rm(p)

@@ -52,8 +52,26 @@ interface StorageProvider {
         }
     }
 
+    /**
+     * 读文件开头最多 length 字节（读音乐标签用）；不支持的存储返回 null，上层改按文件名识别。
+     * 文件不足 length 时返回整个文件
+     */
+    suspend fun readHead(file: RemoteFile, length: Int): ByteArray? = null
+
     /** 不再使用时释放连接（SMB 等长连接） */
     suspend fun close() {}
+}
+
+/** 从流里读最多 length 字节，流提前结束就返回已读到的 */
+fun readUpTo(input: InputStream, length: Int): ByteArray {
+    val buf = ByteArray(length)
+    var n = 0
+    while (n < length) {
+        val r = input.read(buf, n, length - n)
+        if (r < 0) break
+        n += r
+    }
+    return if (n == length) buf else buf.copyOf(n)
 }
 
 fun normalizePath(path: String): String =

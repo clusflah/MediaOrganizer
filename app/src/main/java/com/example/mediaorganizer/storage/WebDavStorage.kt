@@ -112,6 +112,13 @@ class WebDavStorage(
         return moveTo(file, normalize(targetDir).trimEnd('/') + "/" + newName)   // 一次 MOVE 完成
     }
 
+    override suspend fun readHead(file: RemoteFile, length: Int): ByteArray? =
+        execute(Request.Builder().url(url(file.path)).header("Range", "bytes=0-${length - 1}").build()) { resp ->
+            resp.ensure("读取失败：${file.path}")
+            // 不支持 Range 的服务器会返回整个文件，只读需要的部分
+            resp.body!!.byteStream().use { readUpTo(it, length) }
+        }
+
     override suspend fun upload(targetPath: String, data: InputStream, size: Long) {
         val path = normalize(targetPath)
         mkdirs(parentOf(path))

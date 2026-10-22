@@ -158,6 +158,14 @@ class RenamePlanner(
 
 data class PlanOutcome(val plan: RenamePlan, val error: String? = null, val skipped: Boolean = false)
 
+/** 一次移动：把 file 移到 targetDir 并改名为 targetName */
+data class FileMove(val file: RemoteFile, val targetDir: String, val targetName: String) {
+    val targetPath: String get() = joinPath(targetDir, targetName)
+    val unchanged: Boolean get() = normalizePath(file.path) == targetPath
+}
+
+data class MoveOutcome(val error: String? = null, val skipped: Boolean = false)
+
 data class ExecutionReport(
     val outcomes: List<PlanOutcome>,
     val operations: List<FileOperation>,     // 持久化后用于撤销
@@ -176,47 +184,61 @@ class RenameExecutor(
         plans: List<RenamePlan>,
         onProgress: (done: Int, total: Int, outcome: PlanOutcome) -> Unit = { _, _, _ -> },
     ): ExecutionReport {
+        val (results, ops) = executeMoves(plans.map { FileMove(it.item.file, it.targetDir, it.targetName) }, subtitleExt) { done, total, o ->
+            onProgress(done, total, PlanOutcome(plans[done - 1], o.error, o.skipped))
+        }
+        return ExecutionReport(plans.zip(results) { p, o -> PlanOutcome(p, o.error, o.skipped) }, ops)
+    }
+
+    /**
+     * 按顺序移动并改名；companions 是跟着主文件一起走的同名附属文件扩展名（字幕、歌词）：
+     * xxx.chs.srt -> 新名.chs.srt
+     */
+    suspend fun executeMoves(
+        moves: List<FileMove>,
+        companions: Set<String>,
+        onProgress: (done: Int, total: Int, outcome: MoveOutcome) -> Unit = { _, _, _ -> },
+    ): Pair<List<MoveOutcome>, List<FileOperation>> {
         val ops = mutableListOf<FileOperation>()
-        val outcomes = mutableListOf<PlanOutcome>()
+        val outcomes = mutableListOf<MoveOutcome>()
         val dirCache = HashMap<String, List<RemoteFile>>()
         val claimed = HashSet<String>()      // 同一批里两个文件撞同一个目标名
         val knownDirs = HashSet<String>()    // 已确认存在（或本批次创建）的目录
 
-        for ((i, plan) in plans.withIndex()) {
+        for ((i, m) in moves.withIndex()) {
             val outcome = runCatching {
                 when {
-                    plan.unchanged -> PlanOutcome(plan, skipped = true)
-                    !claimed.add(plan.targetPath) -> PlanOutcome(plan, error = "与本批次另一个文件的新名称重复")
-                    storage.exists(plan.targetPath) -> PlanOutcome(plan, error = "目标已存在")
+                    m.unchanged -> MoveOutcome(skipped = true)
+                    !claimed.add(m.targetPath) -> MoveOutcome(error = "与本批次另一个文件的新名称重复")
+                    storage.exists(m.targetPath) -> MoveOutcome(error = "目标已存在")
                     else -> {
-                        val srcDir = parentPath(plan.item.file.path)
+                        val srcDir = parentPath(m.file.path)
                         val siblings = dirCache.getOrPut(srcDir) { storage.list(srcDir) }
 
-                        recordNewDirs(plan.targetDir, knownDirs, ops)
-                        storage.moveAndRename(plan.item.file, plan.targetDir, plan.targetName)
-                        ops += FileOperation(storageId, FileOperation.Type.MOVE, plan.item.file.path, plan.targetPath)
+                        recordNewDirs(m.targetDir, knownDirs, ops)
+                        storage.moveAndRename(m.file, m.targetDir, m.targetName)
+                        ops += FileOperation(storageId, FileOperation.Type.MOVE, m.file.path, m.targetPath)
 
-                        // 同名字幕跟着走：xxx.chs.srt -> 新名.chs.srt
-                        val oldBase = plan.item.file.name.substringBeforeLast('.')
-                        val newBase = plan.targetName.substringBeforeLast('.')
+                        val oldBase = m.file.name.substringBeforeLast('.')
+                        val newBase = m.targetName.substringBeforeLast('.')
                         siblings.filter {
                             !it.isDirectory && it.name.startsWith("$oldBase.") &&
-                                it.name.substringAfterLast('.').lowercase() in subtitleExt
+                                it.name.substringAfterLast('.').lowercase() in companions
                         }.forEach { sub ->
                             val newName = newBase + sub.name.removePrefix(oldBase)
-                            storage.moveAndRename(sub, plan.targetDir, newName)
-                            ops += FileOperation(storageId, FileOperation.Type.MOVE, sub.path, joinPath(plan.targetDir, newName))
+                            storage.moveAndRename(sub, m.targetDir, newName)
+                            ops += FileOperation(storageId, FileOperation.Type.MOVE, sub.path, joinPath(m.targetDir, newName))
                         }
-                        PlanOutcome(plan)
+                        MoveOutcome()
                     }
                 }
-            }.getOrElse { PlanOutcome(plan, error = it.message ?: it.toString()) }
+            }.getOrElse { MoveOutcome(error = it.message ?: it.toString()) }
 
             outcomes += outcome
-            onProgress(i + 1, plans.size, outcome)
+            onProgress(i + 1, moves.size, outcome)
             if (storage.minRequestIntervalMs > 0) delay(storage.minRequestIntervalMs)
         }
-        return ExecutionReport(outcomes, ops)
+        return outcomes to ops
     }
 
     /**
