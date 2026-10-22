@@ -46,6 +46,21 @@ class ExtraSourcesTest {
         assertEquals("267440", ex.tvdbId)
     }
 
+    /** TMDB 没有海报的国产剧、日本动画：豆瓣 / Bangumi 补一张，第二季以后找这一季的 */
+    @Test fun fallbackPosterLive() = runBlocking {
+        val extras = OnlineExtras(ExtraConfig())      // 补充来源全关也能找海报
+        val drama = runCatching { extras.fallbackPoster("枕刀歌", null, 2021, tv = true, anime = false) }.getOrNull()
+        assumeTrue("豆瓣不可达，跳过", drama != null)
+        println("枕刀歌：$drama")
+        assertTrue(drama!!.contains("doubanio.com") && drama.contains("l_ratio_poster"))
+        val anime = extras.fallbackPoster("暗芝居", "闇芝居", 2013, tv = true, anime = true)
+        println("暗芝居：$anime")
+        assertTrue(anime!!.startsWith("https://"))
+        val s2 = extras.fallbackPoster("枕刀歌", null, 2021, tv = true, anime = false, season = 2)
+        println("枕刀歌 第二季：$s2")
+        assertTrue(s2 != null && s2 != drama)
+    }
+
     @Test fun nfoUsesPreferredSource() {
         val ex = ExtraInfo(doubanId = "3541415", doubanRating = 9.4, doubanVotes = 2000000, doubanPlot = "豆瓣简介", preferDouban = true)
         val xml = NfoWriter().movie(inception, ex)

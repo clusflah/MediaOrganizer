@@ -75,6 +75,7 @@ data class ScrapeReport(
     val skipped: Int,
     val errors: List<String>,
     val operations: List<FileOperation> = emptyList(),   // 新建的文件，撤销时删除
+    val noPoster: List<String> = emptyList(),            // TMDB、豆瓣、Bangumi 都没找到海报的片名
 )
 
 class Scraper(
@@ -101,8 +102,23 @@ class Scraper(
         }
 
         val r = writeOutputs(storage, outputs, config.strategy, storageId, source::download, onProgress)
-        return r.copy(errors = errors + r.errors)
+        return r.copy(errors = errors + r.errors, noPoster = noPoster.toList())
     }
+
+    /** 这一批里没找到海报的片名（去重，按出现顺序） */
+    private val noPoster = LinkedHashSet<String>()
+
+    /**
+     * 海报地址：TMDB 的 → 补充来源（豆瓣 / Bangumi）查到的 → 单独到豆瓣 / Bangumi 找。
+     * 以前 TMDB 没有海报时直接不写 poster.jpg，也不提示，媒体库里就是一片空白。
+     */
+    private suspend fun posterOf(tmdbPath: String?, ex: ExtraInfo?, title: String, original: String?, year: Int?,
+                                 tv: Boolean, genres: List<String>, season: Int? = null): String? =
+        tmdbPath ?: ex?.poster?.takeIf { season == null }
+            ?: extras?.let { e ->
+                val anime = genres.any { it == "动画" || it.equals("Animation", true) }
+                runCatching { e.fallbackPoster(title, original, year, tv, anime, season) }.getOrNull()
+            }
 
     /** 根据模板算出一个视频需要哪些附属文件 */
     suspend fun collectOutputs(plan: RenamePlan, c: ScrapeConfig): List<OutputFile> {
@@ -128,17 +144,20 @@ class Scraper(
 
             // 独占文件夹用通用名；和别的电影混放时只能用“视频名-xxx”
             val generic = plan.ownFolder
+            val moviePoster = if (!c.poster) null else
+                posterOf(movie.posterPath, ex, movie.title, movie.originalTitle, movie.year, tv = false, genres = movie.genres)
+                    .also { if (it == null) noPoster += movie.title }
             if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) {
-                if (c.poster) add(joinPath(dir, if (generic) "poster.jpg" else "$base-poster.jpg"), poster(movie.posterPath))
+                if (c.poster) add(joinPath(dir, if (generic) "poster.jpg" else "$base-poster.jpg"), poster(moviePoster))
                 if (c.fanart) add(joinPath(dir, if (generic) "fanart.jpg" else "$base-fanart.jpg"), backdrop(movie.backdropPath))
                 if (c.logo) add(joinPath(dir, if (generic) "clearlogo.png" else "$base-clearlogo.png"), logo)
             }
             if (ScrapeTemplate.INFUSE in t && generic && c.poster) {
-                add(joinPath(dir, "folder.jpg"), poster(movie.posterPath))   // 资源管理器/访达的文件夹封面
+                add(joinPath(dir, "folder.jpg"), poster(moviePoster))   // 资源管理器/访达的文件夹封面
             }
             if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) addFanart(ex, dir, if (generic) "" else "$base-", ::add)
             if (ScrapeTemplate.PLEX in t) {
-                if (c.poster) add(joinPath(dir, "$base.jpg"), poster(movie.posterPath))
+                if (c.poster) add(joinPath(dir, "$base.jpg"), poster(moviePoster))
                 if (c.fanart) add(joinPath(dir, "$base-fanart.jpg"), backdrop(movie.backdropPath))
             }
             return out
@@ -154,16 +173,25 @@ class Scraper(
 
         // 剧集级（多集共用，汇总时自动去重）
         if (c.nfo) add(joinPath(showDir, "tvshow.nfo"), Content.Text(nfo.tvShow(show, ex)))
-        if (c.poster) add(joinPath(showDir, "poster.jpg"), poster(show.posterPath))
+        // 同一部剧的每一集都会走到这里，海报只查一次（补充来源和单独查找都有缓存）
+        val showPoster = if (!c.poster && !c.seasonPoster) null else
+            posterOf(show.posterPath, ex, show.name, show.originalName, show.firstAirYear, tv = true, genres = show.genres)
+                .also { if (it == null) noPoster += show.name }
+        if (c.poster) add(joinPath(showDir, "poster.jpg"), poster(showPoster))
         if (c.fanart) add(joinPath(showDir, "fanart.jpg"), backdrop(show.backdropPath))
         if (c.logo) add(joinPath(showDir, "clearlogo.png"), ex?.art?.logo?.let { Content.Image(it) }
             ?: tmdbLogo(MediaType.TV, show.id, show.source)?.let { Content.Image(source.imageUrl(it, "original")) })
         if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) addFanart(ex, showDir, "", ::add)
-        if (ScrapeTemplate.INFUSE in t && c.poster) add(joinPath(showDir, "folder.jpg"), poster(show.posterPath))
+        if (ScrapeTemplate.INFUSE in t && c.poster) add(joinPath(showDir, "folder.jpg"), poster(showPoster))
 
-        // 季海报
+        // 季海报：TMDB 没有这一季的，找豆瓣 / Bangumi 的这一季，再没有就用剧集海报
         if (c.seasonPoster) {
-            val sp = poster(show.seasons.firstOrNull { it.seasonNumber == season }?.posterPath)
+            val tmdbSeason = show.seasons.firstOrNull { it.seasonNumber == season }?.posterPath
+            val sp = poster(
+                tmdbSeason
+                    ?: (if (season > 1) posterOf(null, null, show.name, show.originalName, null, tv = true, genres = show.genres, season = season) else null)
+                    ?: showPoster,
+            )
             val kodiName = if (season == 0) "season-specials-poster.jpg" else "season%02d-poster.jpg".format(season)
             if (ScrapeTemplate.INFUSE in t || ScrapeTemplate.KODI_EMBY in t) add(joinPath(showDir, kodiName), sp)
             if (ScrapeTemplate.PLEX in t && dir != showDir) add(joinPath(dir, "poster.jpg"), sp)

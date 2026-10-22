@@ -55,7 +55,12 @@ data class ExtraInfo(
     val tvdbId: String? = null,
     val art: FanartArt? = null,
     val preferDouban: Boolean = true,
+    val doubanPoster: String? = null,
+    val bangumiPoster: String? = null,
 ) {
+    /** TMDB 没有海报时用的：动画先用 Bangumi，其次豆瓣 */
+    val poster: String? get() = bangumiPoster ?: doubanPoster
+
     /** 按偏好选简介：Bangumi（动画）> 豆瓣 > null（用 TMDB） */
     val plot: String? get() = if (!preferDouban) null else bangumiPlot?.takeIf { it.isNotBlank() } ?: doubanPlot?.takeIf { it.isNotBlank() }
 
@@ -86,6 +91,12 @@ interface MetadataExtras {
     suspend fun forMovie(m: TmdbMovie): ExtraInfo
     suspend fun forShow(s: TmdbTvShow): ExtraInfo
     suspend fun forEpisode(s: TmdbTvShow, season: Int, episode: Int): EpisodeExtra?
+
+    /**
+     * TMDB 和上面查到的补充信息都没有海报时，单独到豆瓣（动画先到 Bangumi）找一张，不看补充来源开没开。
+     * season > 1 时找这一季的条目（豆瓣、Bangumi 每季是单独的条目）。找不到返回 null。
+     */
+    suspend fun fallbackPoster(title: String, original: String?, year: Int?, tv: Boolean, anime: Boolean, season: Int? = null): String? = null
 }
 
 class OnlineExtras(private val c: ExtraConfig, client: OkHttpClient? = null) : MetadataExtras {
@@ -147,7 +158,41 @@ class OnlineExtras(private val c: ExtraConfig, client: OkHttpClient? = null) : M
         tvdbId = tvdbId,
         art = art,
         preferDouban = c.preferDouban,
+        doubanPoster = doubanPoster(douban),
+        bangumiPoster = bangumiPoster(bgm),
     )
+
+    /** 豆瓣详情里的海报是中图，换成大图（同一张图，路径里 m_ 改 l_） */
+    private fun doubanPoster(j: JSONObject?) = j?.optJSONObject("pic")?.let { it.optString("large").ifBlank { it.optString("normal") } }
+        ?.takeIf { it.startsWith("http") }?.replace("/m_ratio_poster/", "/l_ratio_poster/")
+
+    private fun bangumiPoster(j: JSONObject?) = j?.optJSONObject("images")?.let { it.optString("large").ifBlank { it.optString("common") } }
+        ?.takeIf { it.startsWith("http") }?.replace("http://", "https://")
+
+    private val fallbackPosters = ConcurrentHashMap<String, String>()
+
+    override suspend fun fallbackPoster(title: String, original: String?, year: Int?, tv: Boolean, anime: Boolean, season: Int?): String? {
+        val key = listOf(title, original, year, tv, season).joinToString("|")
+        fallbackPosters[key]?.let { return it.ifEmpty { null } }
+        // 第二季以后：豆瓣、Bangumi 的条目名是「片名 第二季」，年份也是这一季的，所以不按年份筛
+        val seasonTitle = season?.takeIf { it > 1 }?.let { "$title 第${cnNumber(it)}季" }
+        val q = seasonTitle ?: title
+        val y = if (seasonTitle != null) null else year
+        val url = (if (anime) runCatching { bangumiPoster(bangumi(q, original.takeIf { seasonTitle == null }, y)) }.getOrNull() else null)
+            ?: runCatching { doubanPoster(douban(q, original.takeIf { seasonTitle == null }, y, tv)) }.getOrNull()
+        fallbackPosters[key] = url.orEmpty()
+        return url
+    }
+
+    private fun cnNumber(n: Int): String {
+        val d = "零一二三四五六七八九"
+        return when {
+            n < 10 -> d[n].toString()
+            n < 20 -> "十" + if (n % 10 == 0) "" else d[n % 10].toString()
+            n < 100 -> d[n / 10] + "十" + if (n % 10 == 0) "" else d[n % 10].toString()
+            else -> n.toString()
+        }
+    }
 
     private fun isAnime(genres: List<String>) = genres.any { it == "动画" || it.equals("Animation", true) }
 

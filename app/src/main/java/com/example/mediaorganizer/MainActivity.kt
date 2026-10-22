@@ -1160,14 +1160,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         val d = details ?: return
         val t = tmdb ?: return
         progress = null
-        val extras = config.extra.takeIf { it.douban || it.bangumi || it.tvdb || it.fanart }?.let { OnlineExtras(it) }
+        // 补充来源都没开也要建：评分、简介只查开着的来源，但 TMDB 没有海报时要靠它单独到豆瓣 / Bangumi 找一张
+        val extras = OnlineExtras(config.extra)
         val report = Scraper(s, d, TmdbScrapeSource(t), storageId, extras).scrape(plans, config) { done, total ->
             progress = done to total
             status = "${prefix}刮削中 $done/$total"
         }
         rememberOps(report.operations, append = true)     // 撤销时一并删除新写入的 NFO 和图片
         status = "${prefix}刮削：写入 ${report.written}，跳过 ${report.skipped}" +
-            if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else ""
+            (if (report.errors.isNotEmpty()) "，失败 ${report.errors.size}（${report.errors.first()}）" else "") +
+            // TMDB、豆瓣、Bangumi 都没找到海报的，点名提示，免得媒体库里空着还不知道
+            (if (report.noPoster.isNotEmpty()) "，${report.noPoster.size} 部没找到海报（${report.noPoster.take(3).joinToString("、")}${if (report.noPoster.size > 3) " 等" else ""}）" else "")
     }
 
     // ---------- 音乐 ----------
