@@ -76,6 +76,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent { AppRoot() }
+        // 有新版本时提示（一天最多查一次）
+        com.example.mediaorganizer.update.appUpdater.autoCheck(this)
     }
 }
 
