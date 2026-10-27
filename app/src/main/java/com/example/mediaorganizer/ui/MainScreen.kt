@@ -224,6 +224,18 @@ internal fun MainMenu(vm: MainViewModel, openNaming: () -> Unit, openScrape: () 
             text = { Text("外观 · ${theme.label}") },
             onClick = { vm.updateSettings(vm.settings.copy(themeMode = ThemeMode.entries[(theme.ordinal + 1) % ThemeMode.entries.size])) },
         )
+        HorizontalDivider()
+        val activity = androidx.compose.ui.platform.LocalContext.current as android.app.Activity
+        DropdownMenuItem(
+            text = {
+                Column {
+                    Text("检查更新")
+                    Text("当前版本 " + com.example.mediaorganizer.update.appUpdater.currentVersion(activity),
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.outline)
+                }
+            },
+            onClick = { go { com.example.mediaorganizer.update.appUpdater.checkNow(activity) } },
+        )
     }
 }
 
